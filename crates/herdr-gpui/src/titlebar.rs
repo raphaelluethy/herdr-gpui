@@ -1,4 +1,4 @@
-//! Native chrome and GitHub account access.
+//! Native chrome and GitHub account access, native or through `gh`.
 use crate::{HerdrWindow, fonts::StyledFont, menu::Page};
 use gpui::{prelude::*, *};
 
@@ -10,14 +10,25 @@ const AVATAR: f32 = 20.;
 pub(super) const HEIGHT: f32 = 34.;
 
 impl HerdrWindow {
-    fn open_profile(&mut self, connect: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_profile(
+        &mut self,
+        connect: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.menu.page != Some(Page::GitHub) && !self.open_menu(window, cx) {
             return;
         }
         self.menu.page = Some(Page::GitHub);
-        // A device already covered by the main account opens the page rather
-        // than starting a second sign-in for itself.
-        if connect && self.pr_profile().is_none() && !self.github_auth().loading_profile() {
+        // Opening the account panel is when a fresh `gh auth login` should show.
+        self.menu.forge_cli.refresh();
+        // A device already covered by the main account, or by a signed-in
+        // `gh`, opens the page rather than starting a second sign-in for itself.
+        if connect
+            && self.pr_profile().is_none()
+            && self.github_cli_in_use().is_none()
+            && !self.github_auth().loading_profile()
+        {
             self.start_github();
         }
         cx.notify();
@@ -195,7 +206,10 @@ impl HerdrWindow {
     }
 
     pub(super) fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let image = self.pr_profile().and_then(|p| p.avatar.clone());
+        let image = match self.github_cli_in_use() {
+            Some(account) => account.avatar.clone(),
+            None => self.pr_profile().and_then(|p| p.avatar.clone()),
+        };
         render(self.theme.surface)
             .children(self.render_git_button(cx))
             .child(

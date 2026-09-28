@@ -3,6 +3,7 @@
 //! than cancelled mid-flight, and dropping the handle retires the generation.
 
 use super::{Input, Origin, Origins, PullRequest, Result, fetch_with_backoff};
+use crate::forge::Forges;
 use std::{
     sync::{
         Arc,
@@ -13,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-type Request = (u64, Input, Origin, Arc<secrecy::SecretString>);
+type Request = (u64, Input, Origin, Forges);
 
 pub(super) struct Worker {
     pub(super) requests: mpsc::SyncSender<Request>,
@@ -25,7 +26,7 @@ pub(crate) struct Lookup {
     pub(super) worker: Option<Worker>,
     pub(super) generation: Arc<AtomicU64>,
     pub(super) busy: bool,
-    pub(super) waiting: Option<(Input, Origin, Arc<secrecy::SecretString>)>,
+    pub(super) waiting: Option<(Input, Origin, Forges)>,
     pub loading: bool,
     pub value: Option<PullRequest>,
     pub message: Option<String>,
@@ -57,9 +58,9 @@ impl Lookup {
         self.cooldown = None;
     }
 
-    pub fn request(&mut self, input: Input, origin: Origin, token: Arc<secrecy::SecretString>) {
+    pub fn request(&mut self, input: Input, origin: Origin, forges: Forges) {
         self.generation.fetch_add(1, Ordering::Relaxed);
-        self.waiting = Some((input, origin, token));
+        self.waiting = Some((input, origin, forges));
         self.loading = true;
         self.message = None;
     }
@@ -96,7 +97,7 @@ impl Lookup {
             }
         }
         if !self.busy
-            && let Some((input, origin, token)) = self.waiting.take()
+            && let Some((input, origin, forges)) = self.waiting.take()
         {
             if self.worker.is_none() {
                 let (requests, incoming) = mpsc::sync_channel::<Request>(1);
@@ -108,13 +109,13 @@ impl Lookup {
                         // Remote repositories are resolved over SSH; remember
                         // them so a refresh does not dial the host again.
                         let mut origins = Origins::default();
-                        for (generation, input, origin, token) in incoming {
+                        for (generation, input, origin, forges) in incoming {
                             let mut cooldown = None;
                             let result = fetch_with_backoff(
                                 &input,
                                 &origin,
                                 &mut origins,
-                                &token,
+                                &forges,
                                 || current.load(Ordering::Relaxed) != generation,
                                 &mut cooldown,
                             );
@@ -138,7 +139,7 @@ impl Lookup {
                         self.generation.load(Ordering::Relaxed),
                         input,
                         origin,
-                        token,
+                        forges,
                     ))
                     .is_ok();
             }

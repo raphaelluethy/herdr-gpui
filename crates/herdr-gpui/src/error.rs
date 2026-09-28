@@ -146,6 +146,27 @@ pub enum Error {
     PrBranchChanged,
     #[error("PR lookup supports GitHub.com origins only.")]
     PrOrigin,
+    #[error("{} access unavailable for this repository. {}", .0.name(), .0.login_hint())]
+    ForgeAccess(crate::forge::Kind),
+    #[error("No GitHub access. Sign in from the GitHub panel or run `gh auth login`.")]
+    ForgeUnavailable,
+    #[error("{} is not installed.", .0.cli())]
+    CliMissing(crate::forge::Kind),
+    #[error("{} is not signed in. {}", .0.cli(), .0.login_hint())]
+    CliSignedOut(crate::forge::Kind),
+    #[error("{} rate limit reached through {}. Retry later.", .0.name(), .0.cli())]
+    CliRateLimit(crate::forge::Kind),
+    #[error("{} request failed: {details}", kind.cli())]
+    CliFailed {
+        kind: crate::forge::Kind,
+        details: String,
+    },
+    #[error("Invalid {} JSON output.", kind.cli())]
+    CliJson {
+        kind: crate::forge::Kind,
+        #[source]
+        source: GitHubJsonError,
+    },
     #[error("No local worktree matches the daemon branch.")]
     PrMissingWorktree,
     #[error("Multiple local worktrees match the daemon branch.")]
@@ -548,6 +569,13 @@ pub enum Error {
 impl Error {
     pub(crate) fn github_json(source: serde_json::Error) -> Self {
         Self::GitHubJson(GitHubJsonError(source))
+    }
+
+    pub(crate) fn cli_json(kind: crate::forge::Kind, source: serde_json::Error) -> Self {
+        Self::CliJson {
+            kind,
+            source: GitHubJsonError(source),
+        }
     }
 
     pub(crate) fn at_path(self, path: &Path) -> Self {

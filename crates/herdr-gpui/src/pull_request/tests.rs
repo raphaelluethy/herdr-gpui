@@ -11,7 +11,10 @@ use super::{
     parse::{parse, parse_graphql},
     run,
 };
-use crate::Error;
+use crate::{
+    Error,
+    forge::{Access, Forges},
+};
 use std::{
     process::Command,
     sync::{Arc, mpsc},
@@ -20,7 +23,7 @@ use std::{
 
 struct Peer {
     cache: Cache,
-    incoming: mpsc::Receiver<(u64, Input, Origin, Arc<secrecy::SecretString>)>,
+    incoming: mpsc::Receiver<(u64, Input, Origin, Forges)>,
     outgoing: mpsc::SyncSender<(u64, Result, Option<Duration>)>,
 }
 
@@ -30,11 +33,7 @@ impl Peer {
         let (outgoing, results) = mpsc::sync_channel(1);
         let mut cache = Cache::default();
         cache.lookup.worker = Some(Worker { requests, results });
-        cache.scope(
-            (0, 1, "boot".into()),
-            Arc::new("fixture".into()),
-            Origin::Local,
-        );
+        cache.scope((0, 1, "boot".into()), native("fixture"), Origin::Local);
         Self {
             cache,
             incoming,
@@ -47,6 +46,12 @@ impl Peer {
         self.outgoing.send((generation, result, cooldown)).unwrap();
         self.cache.poll(now);
         input
+    }
+}
+
+fn native(token: &str) -> Forges {
+    Forges {
+        github: Some(Access::Native(Arc::new(token.into()))),
     }
 }
 
@@ -183,18 +188,18 @@ fn cache_prefetches_without_menu_and_refreshes_at_ttl_with_stale_data() {
 #[test]
 fn cache_fences_auth_scope_removed_branch_and_late_results() {
     let now = Instant::now();
-    for change in 0..7 {
+    for change in 0..8 {
         let mut peer = Peer::new();
         peer.cache.seed(input("cached"), fixture().unwrap(), now);
         peer.cache.schedule([input("old")], now);
         peer.cache.poll(now);
         let (generation, _, _, _) = peer.incoming.try_recv().unwrap();
-        let token = peer.cache.token.as_ref().unwrap().clone();
+        let token = peer.cache.forges.as_ref().unwrap().clone();
         match change {
             0 => peer.cache.clear(), // sign-out/disconnect
             1 => peer.cache.scope(
                 (0, 1, "boot".into()),
-                Arc::new("other-account".into()),
+                native("other-account"),
                 Origin::Local,
             ),
             2 => peer
@@ -209,6 +214,14 @@ fn cache_fences_auth_scope_removed_branch_and_late_results() {
             5 => peer
                 .cache
                 .scope((0, 1, "boot".into()), token, Origin::Ssh("host".into())),
+            // Switching from the native account to the user's gh is a new account.
+            6 => peer.cache.scope(
+                (0, 1, "boot".into()),
+                Forges {
+                    github: Some(Access::Gh(std::path::Path::new("/bin/gh").into())),
+                },
+                Origin::Local,
+            ),
             _ => peer.cache.retain(|input| input.branch == "new"),
         }
         assert!(peer.cache.entries.is_empty());
@@ -248,7 +261,7 @@ fn signout_drains_private_results_without_starting_queued_work() {
             .is_err()
     );
     assert!(peer.incoming.try_recv().is_err());
-    assert!(peer.cache.token.is_none());
+    assert!(peer.cache.forges.is_none());
 }
 
 #[test]
@@ -434,7 +447,7 @@ fn response() -> serde_json::Value {
 
 #[test]
 fn upstream_matches_renamed_fork_branch_and_rejects_unrelated_heads() {
-    let head = super::fetch::upstream_head("pr/138", |key| {
+    let head = super::fetch::upstream_head("pr/138", &Forges::default(), |key| {
         Ok(match key {
             "branch.pr/138.remote" => Some("contributor".into()),
             "branch.pr/138.merge" => Some("refs/heads/feat/inline-ime-preedit".into()),
@@ -491,7 +504,7 @@ fn upstream_matches_renamed_fork_branch_and_rejects_unrelated_heads() {
 
 #[test]
 fn no_upstream_preserves_origin_owner_and_local_branch_matching() {
-    let head = super::fetch::upstream_head("feature", |_| Ok(None)).unwrap();
+    let head = super::fetch::upstream_head("feature", &Forges::default(), |_| Ok(None)).unwrap();
     assert!(head.is_none());
     let graphql =
         |nodes| serde_json::json!({"data":{"repository":{"pullRequests":{"nodes":nodes}}}});
@@ -522,7 +535,7 @@ fn no_upstream_preserves_origin_owner_and_local_branch_matching() {
 fn unsupported_upstream_and_config_errors_do_not_fall_back() {
     for merge in ["refs/heads/feature", "refs/pull/138/head"] {
         assert!(
-            super::fetch::upstream_head("feature", |key| Ok(Some(
+            super::fetch::upstream_head("feature", &Forges::default(), |key| Ok(Some(
                 match key {
                     "branch.feature.remote" => "fork",
                     "branch.feature.merge" => merge,
@@ -535,7 +548,7 @@ fn unsupported_upstream_and_config_errors_do_not_fall_back() {
         );
     }
     assert!(matches!(
-        super::fetch::upstream_head("feature", |_| Err(Error::PrCancelled)),
+        super::fetch::upstream_head("feature", &Forges::default(), |_| Err(Error::PrCancelled)),
         Err(Error::PrCancelled)
     ));
 }
@@ -654,11 +667,11 @@ fn worker_discards_stale_results_and_runs_only_requested_jobs() {
         repo_key: "/fixture/.git".into(),
         branch: "feature".into(),
     };
-    lookup.request(input.clone(), Origin::Local, Arc::new("fixture".into()));
+    lookup.request(input.clone(), Origin::Local, native("fixture"));
     lookup.poll();
     let (old, _, _, _) = incoming.try_recv().unwrap();
     lookup.clear();
-    lookup.request(input, Origin::Local, Arc::new("fixture".into()));
+    lookup.request(input, Origin::Local, native("fixture"));
     lookup.poll();
     assert!(incoming.try_recv().is_err(), "single in-flight request");
     outgoing
@@ -818,7 +831,7 @@ fn local_git_verification_rejects_wrong_checkout_branch_and_remote_before_gh() {
         branch: "feature".into(),
     };
     assert!(
-        fetch(&input, &"fixture".into(), || false)
+        fetch(&input, &native("fixture"), || false)
             .unwrap_err()
             .to_string()
             .contains("GitHub.com origins only")
@@ -826,7 +839,7 @@ fn local_git_verification_rejects_wrong_checkout_branch_and_remote_before_gh() {
     let mut registry_input = input.clone();
     registry_input.checkout = None;
     assert!(
-        fetch(&registry_input, &"fixture".into(), || false)
+        fetch(&registry_input, &native("fixture"), || false)
             .unwrap_err()
             .to_string()
             .contains("GitHub.com origins only")
@@ -838,33 +851,45 @@ fn local_git_verification_rejects_wrong_checkout_branch_and_remote_before_gh() {
         "https://github.com/example/project.git",
     ]);
     assert_eq!(
-        local_repository(&registry_input, Instant::now() + TIMEOUT, &|| false).unwrap(),
-        ("example".into(), "project".into())
+        local_repository(
+            &registry_input,
+            &Forges::default(),
+            Instant::now() + TIMEOUT,
+            &|| false
+        )
+        .unwrap()
+        .path,
+        "example/project"
     );
     registry_input.branch = "missing".into();
     assert!(
-        local_repository(&registry_input, Instant::now() + TIMEOUT, &|| false)
-            .unwrap_err()
-            .to_string()
-            .contains("No local worktree")
+        local_repository(
+            &registry_input,
+            &Forges::default(),
+            Instant::now() + TIMEOUT,
+            &|| false,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("No local worktree")
     );
     input.branch = "other".into();
     assert!(
-        fetch(&input, &"fixture".into(), || false)
+        fetch(&input, &native("fixture"), || false)
             .unwrap_err()
             .to_string()
             .contains("branch changed")
     );
     input.repo_key = directory.0.to_str().unwrap().into();
     assert!(
-        fetch(&input, &"fixture".into(), || false)
+        fetch(&input, &native("fixture"), || false)
             .unwrap_err()
             .to_string()
             .contains("does not match daemon metadata")
     );
     input.checkout = Some("relative".into());
     assert!(
-        fetch(&input, &"fixture".into(), || false)
+        fetch(&input, &native("fixture"), || false)
             .unwrap_err()
             .to_string()
             .contains("absolute checkout")

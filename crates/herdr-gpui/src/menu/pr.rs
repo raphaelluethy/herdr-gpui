@@ -21,7 +21,7 @@ impl HerdrWindow {
 
     pub(super) fn refresh_workspace_pr(&mut self) {
         self.menu.pr.clear();
-        if self.pr_profile().is_none() {
+        if !self.has_forge_access() {
             return;
         }
         let result = (|| {
@@ -67,16 +67,16 @@ impl HerdrWindow {
             self.menu.pr_cache.clear();
             self.menu.pr_cache_connection = Some(Arc::downgrade(&endpoint.connection.inbox));
         }
-        if let (Some(snapshot), Some(profile), Some(origin)) =
-            (&self.live.snapshot, self.pr_profile(), self.pr_origin())
+        let forges = self.forges();
+        if let (Some(snapshot), false, Some(origin)) =
+            (&self.live.snapshot, forges.is_empty(), self.pr_origin())
         {
             let scope = (
                 self.selection_epoch,
                 self.endpoints[self.selected_endpoint].generation,
                 snapshot.boot_id.clone(),
             );
-            let token = profile.token.clone();
-            self.menu.pr_cache.scope(scope, token, origin);
+            self.menu.pr_cache.scope(scope, forges, origin);
         }
     }
 
@@ -105,7 +105,7 @@ impl HerdrWindow {
 
     pub(crate) fn update_workspace_pr(&mut self) -> bool {
         let mut changed = false;
-        if self.pr_profile().is_none() {
+        if !self.has_forge_access() {
             self.menu.pr_cache.clear();
             self.menu.pr.clear();
             if self.menu.workspace_selected == Some(WorkspaceMenuAction::PullRequest) {
@@ -176,7 +176,7 @@ impl HerdrWindow {
     }
 
     pub(super) fn open_workspace_pr(&self, cx: &mut Context<Self>) {
-        if self.pr_profile().is_some()
+        if self.has_forge_access()
             && self.workspace_pr_target_current()
             && let Some(pr) = &self.menu.pr.value
         {
@@ -744,6 +744,7 @@ mod tests {
         client.handle.disconnect();
         crate::pull_request::local_repository(
             &input,
+            &crate::forge::Forges::default(),
             Instant::now() + Duration::from_secs(15),
             &|| false,
         )
@@ -768,7 +769,9 @@ mod tests {
         lookup.request(
             input,
             crate::pull_request::Origin::Local,
-            profile.token.clone(),
+            crate::forge::Forges {
+                github: Some(crate::forge::Access::Native(profile.token.clone())),
+            },
         );
         let deadline = Instant::now() + Duration::from_secs(20);
         while lookup.loading && Instant::now() < deadline {

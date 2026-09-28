@@ -8,9 +8,9 @@
 //! are explicit user actions and are never retried or replayed automatically.
 use crate::{
     Error,
-    pull_request::{Input, clean, local_checkout, origin_repository, run},
+    forge::{Access, Forges, Remote, Variable},
+    pull_request::{Input, clean, local_checkout, origin_remote, run},
 };
-use secrecy::SecretString;
 use std::{
     collections::VecDeque,
     process::Command,
@@ -96,7 +96,7 @@ enum Job {
     /// Is there anything to commit? Cheaper than counting lines, and all a
     /// sidebar row needs to show its dot.
     Dirty,
-    Run(Action, Option<Arc<SecretString>>),
+    Run(Action, Option<Forges>),
 }
 
 enum Completion {
@@ -293,7 +293,7 @@ impl Git {
     }
 
     /// Queue an explicit user action against the tracked checkout.
-    pub fn start(&mut self, action: Action, token: Option<Arc<SecretString>>) -> crate::Result<()> {
+    pub fn start(&mut self, action: Action, forges: Option<Forges>) -> crate::Result<()> {
         if self.running.is_some() {
             return Err(Error::GitBusy);
         }
@@ -303,13 +303,13 @@ impl Git {
         {
             return Err(Error::GitCommitMessage);
         }
-        if matches!(action, Action::CreatePullRequest) && token.is_none() {
-            return Err(Error::GitHubAuthentication);
+        if matches!(action, Action::CreatePullRequest) && forges.is_none() {
+            return Err(Error::ForgeUnavailable);
         }
         self.error = None;
         self.outcome = None;
         self.running = Some(action.clone());
-        self.waiting = Some((input, Job::Run(action, token)));
+        self.waiting = Some((input, Job::Run(action, forges)));
         Ok(())
     }
 
@@ -433,7 +433,7 @@ fn execute(input: &Input, job: Job, cancelled: &impl Fn() -> bool) -> Completion
         // Writes are never cancelled: killing `git commit` or `git push`
         // halfway through can leave an index lock or a half-written ref behind,
         // so only their own deadline ends them.
-        Job::Run(action, token) => Completion::Action(perform(input, action, token, &|| false)),
+        Job::Run(action, forges) => Completion::Action(perform(input, action, forges, &|| false)),
     }
 }
 
@@ -513,7 +513,7 @@ fn parse_numstat(text: &str) -> Status {
 fn perform(
     input: &Input,
     action: Action,
-    token: Option<Arc<SecretString>>,
+    forges: Option<Forges>,
     cancelled: &impl Fn() -> bool,
 ) -> crate::Result<Outcome> {
     let deadline = Instant::now() + OPERATION_TIMEOUT;
@@ -522,8 +522,8 @@ fn perform(
         Action::Commit(message) => commit(&checkout, &message, deadline, cancelled),
         Action::Push => push(&checkout, &input.branch, deadline, cancelled),
         Action::CreatePullRequest => {
-            let token = token.ok_or(Error::GitHubAuthentication)?;
-            create_pull_request(&checkout, &input.branch, &token, deadline, cancelled)
+            let forges = forges.ok_or(Error::ForgeUnavailable)?;
+            create_pull_request(&checkout, &input.branch, &forges, deadline, cancelled)
         }
     }
 }
@@ -586,11 +586,12 @@ fn push(
 fn create_pull_request(
     checkout: &str,
     branch: &str,
-    token: &SecretString,
+    forges: &Forges,
     deadline: Instant,
     cancelled: &impl Fn() -> bool,
 ) -> crate::Result<Outcome> {
-    let (owner, repo) = origin_repository(checkout, deadline, cancelled)?;
+    let remote = origin_remote(checkout, forges, deadline, cancelled)?;
+    let access = forges.access(&remote)?;
     let title = clean(&git(
         checkout,
         &["log", "-1", "--pretty=format:%s"],
@@ -602,7 +603,7 @@ fn create_pull_request(
     if title.is_empty() {
         return Err(Error::GitPullRequestTitle);
     }
-    // The head ref must exist on GitHub before a pull request can reference it.
+    // The head ref must exist on the forge before a pull request can reference it.
     git(
         checkout,
         &["push", "--set-upstream", "origin", branch],
@@ -610,12 +611,26 @@ fn create_pull_request(
         deadline,
         cancelled,
     )?;
+    create_github_pull_request(&remote, access, branch, &title, cancelled)
+}
+
+fn create_github_pull_request(
+    remote: &Remote,
+    access: &Access,
+    branch: &str,
+    title: &str,
+    cancelled: &impl Fn() -> bool,
+) -> crate::Result<Outcome> {
+    let (owner, repo) = (remote.owner(), remote.name());
     let mut cooldown = None;
-    let repository = crate::github::graphql(
+    let repository = crate::forge::graphql(
         "create_pr_repository",
-        token,
+        access,
         REPOSITORY_QUERY,
-        serde_json::json!({"owner": owner, "repo": repo}),
+        &[
+            ("owner", Variable::Text(owner)),
+            ("repo", Variable::Text(repo)),
+        ],
         API_TIMEOUT,
         cancelled,
         &mut cooldown,
@@ -633,18 +648,22 @@ fn create_pull_request(
     if base == branch {
         return Err(Error::GitPullRequestBase);
     }
-    let created = crate::github::graphql(
+    let created = crate::forge::graphql(
         "create_pr",
-        token,
+        access,
         CREATE_MUTATION,
-        serde_json::json!({
-            "repository": id, "base": base, "head": branch, "title": title, "body": ""
-        }),
+        &[
+            ("repository", Variable::Text(&id)),
+            ("base", Variable::Text(&base)),
+            ("head", Variable::Text(branch)),
+            ("title", Variable::Text(title)),
+            ("body", Variable::Text("")),
+        ],
         API_TIMEOUT,
         cancelled,
         &mut cooldown,
     )?;
-    parse_created(&created, &owner, &repo)
+    parse_created(&created, owner, repo)
 }
 
 fn parse_created(response: &serde_json::Value, owner: &str, repo: &str) -> crate::Result<Outcome> {
@@ -913,7 +932,7 @@ mod tests {
         ));
         assert!(matches!(
             peer.git.start(Action::CreatePullRequest, None),
-            Err(Error::GitHubAuthentication)
+            Err(Error::ForgeUnavailable)
         ));
         peer.git
             .start(Action::Commit("subject".into()), None)

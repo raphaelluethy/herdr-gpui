@@ -159,6 +159,11 @@ size = 12
 # WARNING: saves an UNENCRYPTED token in the separate 0600 github-credentials file.
 # Other software running as you and backups can read it. Default is false.
 # allow_plaintext_credentials = false
+# Use your own authenticated GitHub CLI (`gh auth login`) for pull requests.
+# Its credential stays with gh; this app only runs `gh api`. "auto" uses gh
+# when there is no native sign-in, "prefer" uses gh even when there is one,
+# and "off" never runs gh.
+# cli = "auto"
 
 # Optional behaviors, all off unless turned on here. Unknown keys are rejected.
 # [features]

@@ -21,16 +21,3 @@ pub(crate) use {
 
 #[cfg(test)]
 pub(crate) use model::issue_branch;
-
-/// The GitHub repository a workspace's `origin` remote points at.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Origin {
-    pub owner: String,
-    pub repo: String,
-}
-
-impl Origin {
-    pub(crate) fn slug(&self) -> String {
-        format!("{}/{}", self.owner, self.repo)
-    }
-}

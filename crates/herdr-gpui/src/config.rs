@@ -501,6 +501,22 @@ pub struct Features {
 pub struct GitHubConfig {
     pub oauth_client_id: Option<String>,
     pub allow_plaintext_credentials: bool,
+    /// Whether an authenticated `gh` can stand in for the native sign-in.
+    pub cli: GitHubCli,
+}
+
+/// When the user's own authenticated GitHub CLI reads and creates pull
+/// requests. Its credential stays with the CLI either way.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitHubCli {
+    /// Use `gh` only when there is no native sign-in.
+    #[default]
+    Auto,
+    /// Use `gh` whenever it is signed in, even over a native sign-in.
+    Prefer,
+    /// Never run `gh`.
+    Off,
 }
 
 impl GitHubConfig {
@@ -3230,6 +3246,30 @@ mod tests {
                 .features
                 .sidebar_hover_menu
         );
+        Ok(())
+    }
+
+    #[test]
+    fn forge_cli_modes_parse_strictly_and_default_to_auto() -> anyhow::Result<()> {
+        assert_eq!(Config::default().github.cli, GitHubCli::Auto);
+        assert_eq!(Config::parse("")?.github.cli, GitHubCli::Auto);
+        for (text, mode) in [
+            ("auto", GitHubCli::Auto),
+            ("prefer", GitHubCli::Prefer),
+            ("off", GitHubCli::Off),
+        ] {
+            assert_eq!(
+                Config::parse(&format!("[github]\ncli = '{text}'"))?
+                    .github
+                    .cli,
+                mode
+            );
+        }
+        for text in ["[github]\ncli = 'always'", "[github]\ncli = true"] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+        // The shipped example documents the key without changing the default.
+        assert_eq!(Config::parse(DEFAULT_CONFIG)?.github.cli, GitHubCli::Auto);
         Ok(())
     }
 

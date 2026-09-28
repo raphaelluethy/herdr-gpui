@@ -131,7 +131,7 @@ impl HerdrWindow {
         self.menu.reset();
         self.menu.anchor = anchor;
         self.menu.page = Some(Page::Git);
-        if self.menu.github.connected()
+        if self.has_forge_access()
             && let Some(input) = self.git_input()
         {
             self.sync_pr_scope();
@@ -146,16 +146,14 @@ impl HerdrWindow {
     /// lifecycle it is in. Reading the cache never schedules work.
     pub(crate) fn git_pull_request(&self) -> Option<&crate::pull_request::PullRequest> {
         let input = self.git.tracked()?;
-        self.menu
-            .github
-            .connected()
+        self.has_forge_access()
             .then(|| self.menu.pr_cache.peek(&input.repo_key, &input.branch))
             .flatten()
     }
 
     /// A GitHub lookup for the focused branch is in flight or about to be.
     fn git_pull_request_loading(&self) -> bool {
-        self.menu.github.connected()
+        self.has_forge_access()
             && self
                 .git
                 .tracked()
@@ -214,13 +212,9 @@ impl HerdrWindow {
     }
 
     fn start_git(&mut self, action: Action) {
-        let token = self
-            .menu
-            .github
-            .profile
-            .as_ref()
-            .map(|profile| profile.token.clone());
-        if let Err(error) = self.git.start(action, token) {
+        let forges = self.forges();
+        let forges = (!forges.is_empty()).then_some(forges);
+        if let Err(error) = self.git.start(action, forges) {
             self.menu.error = Some(error.to_string());
         } else {
             self.menu.error = None;
@@ -889,9 +883,10 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.git = crate::git::Git::fixture(input.clone(), status(0, 0, 0));
                 view.menu.github = crate::github::Auth::connected_fixture();
+                let forges = view.forges();
                 view.menu.pr_cache.scope(
                     (0, 1, "boot".into()),
-                    Arc::new("fixture".into()),
+                    forges,
                     crate::pull_request::Origin::Local,
                 );
                 view.menu

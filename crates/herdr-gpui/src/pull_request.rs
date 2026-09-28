@@ -11,7 +11,7 @@ mod tests;
 
 pub(crate) use {
     cache::Cache,
-    fetch::{local_checkout, origin_repository, run},
+    fetch::{Output, local_checkout, origin_remote, run, run_split, strip_git_environment},
     lookup::Lookup,
     model::{Input, Origin, PullRequest, State, clean, repository_input},
 };

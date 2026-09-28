@@ -184,6 +184,9 @@ impl HerdrWindow {
                 // does not know, must not sign GitHub out: restore the saved
                 // credential under the settings already in effect.
                 let mut reloaded = false;
+                // A reload is also how a user asks for `gh auth login` to be
+                // noticed before the probe's own expiry.
+                this.menu.forge_cli.refresh();
                 if this.avatars.is_some() {
                     reloaded = this.menu.github.initialize(&this.config);
                     for auth in this.menu.github_hosts.values_mut() {

@@ -2,8 +2,7 @@
 //! seeds. Remote text is untrusted: titles and branch names are cleaned and
 //! length-bounded before they can reach a label or a daemon request.
 
-use super::Origin;
-use crate::{Error, pull_request::clean};
+use crate::{Error, forge::Remote, pull_request::clean};
 use serde_json::Value;
 
 /// Items per list. The tabs are a picker, not a mirror of the repository, so a
@@ -122,7 +121,7 @@ pub(crate) fn issue_branch(number: u64, title: &str) -> String {
 
 /// Read one list out of a GraphQL response. A repository the token cannot see
 /// comes back as a null node rather than an error, so absence is rejected here.
-pub(super) fn parse(response: &Value, origin: &Origin, kind: Kind) -> crate::Result<Vec<Item>> {
+pub(super) fn parse(response: &Value, origin: &Remote, kind: Kind) -> crate::Result<Vec<Item>> {
     let nodes = response["data"]["repository"][kind.field()]["nodes"]
         .as_array()
         .ok_or(Error::PrRepository)?;
@@ -133,7 +132,7 @@ pub(super) fn parse(response: &Value, origin: &Origin, kind: Kind) -> crate::Res
         .collect())
 }
 
-fn item(node: &Value, origin: &Origin, kind: Kind) -> Option<Item> {
+fn item(node: &Value, origin: &Remote, kind: Kind) -> Option<Item> {
     let number = node["number"].as_u64().filter(|number| *number > 0)?;
     // A pull request without a usable head ref cannot seed a checkout, so it is
     // dropped rather than listed as a row that can only fail.
@@ -147,7 +146,7 @@ fn item(node: &Value, origin: &Origin, kind: Kind) -> Option<Item> {
                 .as_str()
                 .unwrap_or_default(),
         );
-        (!login.eq_ignore_ascii_case(&origin.owner)).then_some(login)
+        (!login.eq_ignore_ascii_case(origin.owner())).then_some(login)
     });
     Some(Item {
         kind,
@@ -156,9 +155,8 @@ fn item(node: &Value, origin: &Origin, kind: Kind) -> Option<Item> {
         // Rebuilt from the repository that was asked for, so a response can
         // never point a row at another repository.
         url: format!(
-            "https://github.com/{}/{}/{}/{number}",
-            origin.owner,
-            origin.repo,
+            "https://github.com/{}/{}/{number}",
+            origin.slug(),
             match kind {
                 Kind::PullRequest => "pull",
                 Kind::Issue => "issues",

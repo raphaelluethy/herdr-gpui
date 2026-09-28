@@ -116,6 +116,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_signed_in_gh_stands_in_for_the_native_account_by_config(cx: &mut TestAppContext) {
+        use crate::{config::GitHubCli, forge::Access};
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                assert!(!view.has_forge_access());
+                view.menu.forge_cli = crate::forge::Probe::signed_in_fixture(
+                    std::path::Path::new("/fixture/gh"),
+                    "octo",
+                );
+                assert!(matches!(view.forges().github, Some(Access::Gh(_))));
+                assert_eq!(
+                    view.github_cli_in_use()
+                        .map(|account| account.login.as_str()),
+                    Some("octo")
+                );
+                // The account panel says who gh is signed in as, and opening
+                // it from the titlebar does not start a native sign-in.
+                view.open_profile(true, window, cx);
+                assert!(!view.menu.github.busy());
+                assert_eq!(view.forge_cli_notes(), ["Using GitHub CLI as @octo."]);
+
+                // A native sign-in wins under "auto", gh under "prefer".
+                view.menu.github = crate::github::Auth::connected_fixture();
+                assert!(matches!(view.forges().github, Some(Access::Native(_))));
+                assert!(view.github_cli_in_use().is_none());
+                assert!(view.forge_cli_notes()[0].contains("takes precedence"));
+                view.config.github.cli = GitHubCli::Prefer;
+                assert!(matches!(view.forges().github, Some(Access::Gh(_))));
+
+                // "off" never uses the CLI, even with no native account.
+                view.config.github.cli = GitHubCli::Off;
+                view.menu.github = crate::github::Auth::default();
+                assert!(!view.has_forge_access());
+            });
+        });
+    }
+
+    #[gpui::test]
     fn host_note_names_the_account_pull_requests_use(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         cx.update(|window, cx| {
@@ -308,6 +347,69 @@ impl HerdrWindow {
             .or(self.menu.github.profile.as_ref())
     }
 
+    /// Every forge grant pull requests on the selected device can use: the
+    /// native account `pr_profile` picks, or the user's signed-in `gh`, in the
+    /// order `[github] cli` sets. A CLI runs on this machine, so it serves
+    /// every device's lookups, which also run here.
+    pub(crate) fn forges(&self) -> crate::forge::Forges {
+        crate::forge::Forges {
+            github: crate::forge::github_access(
+                self.pr_profile().map(|profile| &profile.token),
+                self.menu.forge_cli.gh.program(),
+                self.config.github.cli,
+            ),
+        }
+    }
+
+    /// Whether any forge can be asked about pull requests. Which one serves a
+    /// workspace is decided by its origin, once the lookup has resolved it.
+    pub(crate) fn has_forge_access(&self) -> bool {
+        !self.forges().is_empty()
+    }
+
+    /// The `gh` account in effect for GitHub, when the CLI rather than the
+    /// native sign-in is serving it.
+    pub(crate) fn github_cli_in_use(&self) -> Option<&crate::forge::Account> {
+        matches!(self.forges().github, Some(crate::forge::Access::Gh(_)))
+            .then(|| self.menu.forge_cli.gh.account())
+            .flatten()
+    }
+
+    /// What the account panel says about the forge CLIs, when there is
+    /// anything to say: which one is in use, or why one is not.
+    fn forge_cli_notes(&self) -> Vec<String> {
+        use crate::forge::Status;
+        let mut notes = Vec::new();
+        match &self.menu.forge_cli.gh {
+            Status::SignedIn(account) if self.github_cli_in_use().is_some() => {
+                notes.push(format!("Using GitHub CLI as @{}.", account.login));
+            }
+            Status::SignedIn(account) => notes.push(format!(
+                "GitHub CLI is signed in as @{}; this sign-in takes precedence. Set [github] cli = \"prefer\" to use gh instead.",
+                account.login
+            )),
+            Status::SignedOut => notes.push(
+                "GitHub CLI found but not signed in. Run `gh auth login` to use it for pull requests."
+                    .into(),
+            ),
+            Status::Failed(reason) => notes.push(format!("GitHub CLI unavailable: {reason}")),
+            Status::Unknown | Status::NotInstalled => {}
+        }
+        notes
+    }
+
+    /// Probe the forge CLIs the config allows. Headless windows never run
+    /// the user's CLIs, as they never touch saved credentials.
+    fn poll_forge_cli(&mut self) -> bool {
+        if self.avatars.is_none() {
+            return false;
+        }
+        let enabled = crate::forge::Enabled {
+            gh: self.config.github.cli != crate::config::GitHubCli::Off,
+        };
+        self.menu.forge_cli.poll(std::time::Instant::now(), enabled)
+    }
+
     /// Keep one account per saved SSH device. A removed device's account is
     /// dropped from memory; its saved credential stays until signed out, so
     /// re-adding the device finds it again.
@@ -345,6 +447,7 @@ impl HerdrWindow {
         self.prune_device_removals();
         let connected = self.github_auth().connected();
         let mut changed = self.menu.github.poll();
+        changed |= self.poll_forge_cli();
         for auth in self.menu.github_hosts.values_mut() {
             changed |= auth.poll();
         }
@@ -604,6 +707,15 @@ impl HerdrWindow {
                     ),
             );
         }
+        for note in self.forge_cli_notes() {
+            body = body.child(
+                div()
+                    .debug_selector(|| "github-cli".into())
+                    .mt(px(12.))
+                    .text_color(rgb(theme.muted))
+                    .child(note),
+            );
+        }
         if let Some(code) = auth.code() {
             body = body
                 .child(div().mb(px(12.)).child("1. Copy your one-time code"))
@@ -644,6 +756,8 @@ impl HerdrWindow {
                 "Checking GitHub account..."
             } else if auth.connected() {
                 "Your account is ready for pull request lookups."
+            } else if self.github_cli_in_use().is_some() {
+                "Pull requests use the GitHub CLI. Sign in here to use a native account instead."
             } else {
                 "Sign in securely in your browser to view pull requests. No GitHub CLI required."
             }

@@ -25,6 +25,7 @@ mod error;
 mod font_picker;
 mod font_sizes;
 mod fonts;
+mod forge;
 mod git;
 mod github;
 mod group_menu;

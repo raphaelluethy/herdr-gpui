@@ -2,10 +2,8 @@
 //! capped in number so a long session cannot grow it without limit.
 
 use super::{Input, Lookup, Origin, PullRequest};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use crate::forge::Forges;
+use std::time::{Duration, Instant};
 
 pub(super) const CACHE_LIMIT: usize = 128;
 pub(super) const REFRESH: Duration = Duration::from_secs(90);
@@ -21,7 +19,8 @@ pub(super) struct Entry {
 }
 
 /// The scope includes selection epoch, connection generation and daemon boot.
-/// Token allocation identity is an additional auth generation, never token text.
+/// The grants held are an additional auth generation, compared by identity
+/// (token allocation or CLI path), never token text.
 #[derive(Default)]
 pub(crate) struct Cache {
     pub(super) lookup: Lookup,
@@ -29,7 +28,7 @@ pub(crate) struct Cache {
     pub(super) queue: std::collections::VecDeque<Input>,
     pub(super) active: Option<Input>,
     pub(super) scope: Option<(u64, u64, String)>,
-    pub(super) token: Option<Arc<secrecy::SecretString>>,
+    pub(super) forges: Option<Forges>,
     pub(super) origin: Origin,
     pub(super) next_scan: Option<Instant>,
     pub(super) paused_until: Option<Instant>,
@@ -59,30 +58,22 @@ impl Cache {
         self.queue.clear();
         self.active = None;
         self.scope = None;
-        self.token = None;
+        self.forges = None;
         self.origin = Origin::Local;
         self.next_scan = None;
         self.paused_until = None;
         self.cursor = 0;
     }
 
-    /// A different device, daemon boot, account, or origin starts over.
-    pub fn scope(
-        &mut self,
-        scope: (u64, u64, String),
-        token: Arc<secrecy::SecretString>,
-        origin: Origin,
-    ) {
+    /// A different device, daemon boot, account, CLI, or origin starts over.
+    pub fn scope(&mut self, scope: (u64, u64, String), forges: Forges, origin: Origin) {
         if self.scope.as_ref() != Some(&scope)
             || self.origin != origin
-            || self
-                .token
-                .as_ref()
-                .is_none_or(|old| !Arc::ptr_eq(old, &token))
+            || self.forges.as_ref() != Some(&forges)
         {
             self.clear();
             self.scope = Some(scope);
-            self.token = Some(token);
+            self.forges = Some(forges);
             self.origin = origin;
         }
     }
@@ -180,7 +171,7 @@ impl Cache {
         }
         if self.active.is_none()
             && self.paused_until.is_none_or(|until| now >= until)
-            && let Some(token) = &self.token
+            && let Some(forges) = &self.forges
         {
             while let Some(input) = self.queue.pop_front() {
                 let existing = self.entries.iter().find(|entry| entry.input == input);
@@ -193,7 +184,7 @@ impl Cache {
                 }
                 self.lookup.clear();
                 self.lookup
-                    .request(input.clone(), self.origin.clone(), token.clone());
+                    .request(input.clone(), self.origin.clone(), forges.clone());
                 self.active = Some(input);
                 self.cursor = self.cursor.wrapping_add(1);
                 self.lookup.poll();
@@ -208,7 +199,7 @@ impl Cache {
     /// chrome can say it is waiting on GitHub. A paused account is not loading.
     pub fn loading(&self, input: &Input, now: Instant) -> bool {
         self.active.as_ref() == Some(input)
-            || (self.token.is_some()
+            || (self.forges.is_some()
                 && self.paused_until.is_none_or(|until| now >= until)
                 && self.queue.contains(input))
     }
@@ -236,7 +227,7 @@ impl Cache {
             view.checked = Some(entry.checked);
         } else {
             if self.paused_until.is_some_and(|until| now < until) {
-                view.message = Some("GitHub requests paused after an authentication or rate-limit error; retrying automatically.".into());
+                view.message = Some("Pull request lookups paused after an authentication or rate-limit error; retrying automatically.".into());
             } else {
                 view.loading = true;
             }

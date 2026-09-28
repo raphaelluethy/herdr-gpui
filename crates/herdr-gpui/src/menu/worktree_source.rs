@@ -558,9 +558,9 @@ impl HerdrWindow {
             return;
         }
         match self.repo_items_request() {
-            Ok((input, token)) => {
+            Ok((input, forges)) => {
                 if let Some(source) = &mut self.menu.worktree {
-                    source.lookup.list(input, token);
+                    source.lookup.list(input, forges);
                 }
             }
             Err(error) => {
@@ -588,22 +588,16 @@ impl HerdrWindow {
         crate::pull_request::repository_input(target.worktree.as_ref(), target.branch.as_deref())
     }
 
-    /// The checkout to read and the token to read GitHub with.
+    /// The checkout to read and the grants to read its forge with.
     fn repo_items_request(
         &self,
-    ) -> crate::Result<(
-        crate::pull_request::Input,
-        std::sync::Arc<secrecy::SecretString>,
-    )> {
+    ) -> crate::Result<(crate::pull_request::Input, crate::forge::Forges)> {
         let input = self.local_repository_input()?;
-        let token = self
-            .menu
-            .github
-            .profile
-            .as_ref()
-            .map(|profile| profile.token.clone())
-            .ok_or(crate::Error::GitHubAuthentication)?;
-        Ok((input, token))
+        let forges = self.forges();
+        if forges.is_empty() {
+            return Err(crate::Error::ForgeUnavailable);
+        }
+        Ok((input, forges))
     }
 
     /// Open or create whatever the row at `row` of the open listing names.
@@ -642,9 +636,9 @@ impl HerdrWindow {
         match (item.head.clone(), self.repo_items_request()) {
             // An existing pull request branch may only exist on the remote, so
             // its base ref is refreshed before the daemon is asked for it.
-            (Some(_), Ok((input, token))) => {
+            (Some(_), Ok((input, forges))) => {
                 if let Some(source) = &mut self.menu.worktree {
-                    source.lookup.fetch_branch(input, token, &item);
+                    source.lookup.fetch_branch(input, forges, &item);
                     source.pending = Some(Pending::Item(item));
                 }
                 cx.notify();
@@ -825,7 +819,7 @@ pub(super) fn item_request(
 /// daemon or a repository.
 #[cfg(test)]
 impl WorktreeSource {
-    pub(crate) fn install(&mut self, origin: repo_items::Origin, items: Vec<Item>) {
+    pub(crate) fn install(&mut self, origin: crate::forge::Remote, items: Vec<Item>) {
         self.lookup.origin = Some(origin);
         self.lookup.items = items;
         self.lookup.loading = false;

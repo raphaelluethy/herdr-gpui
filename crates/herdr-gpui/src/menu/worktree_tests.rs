@@ -6,16 +6,14 @@ use super::{
 };
 use crate::{
     HerdrWindow,
-    repo_items::{Branch, Item, Kind, Origin},
+    forge::Remote,
+    repo_items::{Branch, Item, Kind},
     sidebar,
 };
 use gpui::{Entity, VisualTestContext};
 
-fn origin() -> Origin {
-    Origin {
-        owner: "penso".into(),
-        repo: "herdr-gpui".into(),
-    }
+fn origin() -> Remote {
+    Remote::github("penso", "herdr-gpui")
 }
 
 fn items() -> Vec<Item> {

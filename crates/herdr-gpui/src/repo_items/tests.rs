@@ -1,15 +1,12 @@
 #![allow(clippy::unwrap_used)]
 
-use super::{Kind, Origin, issue_branch, model::parse, write_context};
-use crate::Error;
+use super::{Kind, issue_branch, model::parse, write_context};
+use crate::{Error, forge::Remote};
 use core::prelude::v1::test;
 use serde_json::json;
 
-fn origin() -> Origin {
-    Origin {
-        owner: "penso".into(),
-        repo: "herdr-gpui".into(),
-    }
+fn origin() -> Remote {
+    Remote::github("penso", "herdr-gpui")
 }
 
 fn response() -> serde_json::Value {

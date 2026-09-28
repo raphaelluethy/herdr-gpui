@@ -6,10 +6,7 @@ use super::{
     Page, WorkspaceAction,
     worktree_source::{Row, Tab},
 };
-use crate::{
-    HerdrWindow,
-    repo_items::{Kind, Origin},
-};
+use crate::{HerdrWindow, repo_items::Kind};
 use gpui::{prelude::*, *};
 
 impl HerdrWindow {
@@ -166,7 +163,7 @@ impl HerdrWindow {
                     .lookup
                     .origin
                     .as_ref()
-                    .map(Origin::slug)
+                    .map(|origin| origin.slug().to_owned())
                     .unwrap_or_default(),
             }
         };

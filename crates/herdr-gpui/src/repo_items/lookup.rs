@@ -2,8 +2,11 @@
 //! flight at a time and a superseded one is dropped by generation, so a reply
 //! from a dismissed dialog can never land in a newer one.
 
-use super::{Item, Origin, fetch};
-use crate::pull_request::Input;
+use super::{Item, fetch};
+use crate::{
+    forge::{Forges, Remote},
+    pull_request::Input,
+};
 use std::{
     sync::{
         Arc,
@@ -27,14 +30,14 @@ pub(super) enum Task {
 /// cannot arm a checkout for a different pull request.
 #[derive(Debug)]
 pub(crate) enum Done {
-    Listed(Origin, Vec<Item>),
+    Listed(Remote, Vec<Item>),
     Fetched(String),
 }
 
 type Answer = crate::Result<Done>;
 
 struct Worker {
-    requests: mpsc::SyncSender<(u64, Input, Arc<secrecy::SecretString>, Task)>,
+    requests: mpsc::SyncSender<(u64, Input, Forges, Task)>,
     results: mpsc::Receiver<(u64, Answer)>,
 }
 
@@ -43,10 +46,10 @@ pub(crate) struct Lookup {
     worker: Option<Worker>,
     generation: Arc<AtomicU64>,
     busy: bool,
-    waiting: Option<(Input, Arc<secrecy::SecretString>, Task)>,
+    waiting: Option<(Input, Forges, Task)>,
     /// Set while any request is outstanding, so the tabs can say so.
     pub loading: bool,
-    pub origin: Option<Origin>,
+    pub origin: Option<Remote>,
     pub items: Vec<Item>,
     pub message: Option<String>,
     /// The branch a finished fetch made available, for the window to act on.
@@ -65,19 +68,19 @@ impl Lookup {
         self.origin.is_some()
     }
 
-    pub fn list(&mut self, input: Input, token: Arc<secrecy::SecretString>) {
-        self.request(input, token, Task::List);
+    pub fn list(&mut self, input: Input, forges: Forges) {
+        self.request(input, forges, Task::List);
         self.items.clear();
         self.origin = None;
     }
 
-    pub fn fetch_branch(&mut self, input: Input, token: Arc<secrecy::SecretString>, item: &Item) {
-        self.request(input, token, Task::Fetch(item.clone()));
+    pub fn fetch_branch(&mut self, input: Input, forges: Forges, item: &Item) {
+        self.request(input, forges, Task::Fetch(item.clone()));
     }
 
-    fn request(&mut self, input: Input, token: Arc<secrecy::SecretString>, task: Task) {
+    fn request(&mut self, input: Input, forges: Forges, task: Task) {
         self.generation.fetch_add(1, Ordering::Relaxed);
-        self.waiting = Some((input, token, task));
+        self.waiting = Some((input, forges, task));
         self.loading = true;
         self.message = None;
         self.ready = None;
@@ -133,10 +136,10 @@ impl Lookup {
                 return true;
             }
             if let Some(worker) = &self.worker {
-                let (input, token, task) = request;
+                let (input, forges, task) = request;
                 self.busy = worker
                     .requests
-                    .try_send((self.generation.load(Ordering::Relaxed), input, token, task))
+                    .try_send((self.generation.load(Ordering::Relaxed), input, forges, task))
                     .is_ok();
             }
         }
@@ -144,18 +147,17 @@ impl Lookup {
     }
 
     fn start(&mut self) -> bool {
-        let (requests, incoming) =
-            mpsc::sync_channel::<(u64, Input, Arc<secrecy::SecretString>, Task)>(1);
+        let (requests, incoming) = mpsc::sync_channel::<(u64, Input, Forges, Task)>(1);
         let (outgoing, results) = mpsc::sync_channel(1);
         let current = self.generation.clone();
         let mut cooldown = self.cooldown;
         let started = thread::Builder::new()
             .name("herdr-repo-items".into())
             .spawn(move || {
-                for (generation, input, token, task) in incoming {
+                for (generation, input, forges, task) in incoming {
                     let cancelled = || current.load(Ordering::Relaxed) != generation;
                     let result = match &task {
-                        Task::List => fetch::list(&input, &token, cancelled, &mut cooldown)
+                        Task::List => fetch::list(&input, &forges, cancelled, &mut cooldown)
                             .map(|(origin, items)| Done::Listed(origin, items)),
                         Task::Fetch(item) => fetch::fetch_branch(&input, item, &cancelled)
                             .map(|()| Done::Fetched(item.branch())),

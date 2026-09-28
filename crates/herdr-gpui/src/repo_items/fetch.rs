@@ -2,9 +2,10 @@
 //! request's head branch reachable before a checkout is asked for. Every step
 //! has a deadline and runs off the UI thread.
 
-use super::{Item, Kind, Origin, model::LIMIT, model::parse};
+use super::{Item, Kind, model::LIMIT, model::parse};
 use crate::{
     Error,
+    forge::{Forges, Remote, Variable},
     pull_request::{Input, local_checkout, local_repository, run},
 };
 use std::{
@@ -31,21 +32,25 @@ const QUERY: &str = r#"query($owner: String!, $repo: String!, $count: Int!) {
 /// The repository's open pull requests and issues, most recently updated first.
 pub(super) fn list(
     input: &Input,
-    token: &secrecy::SecretString,
+    forges: &Forges,
     cancelled: impl Fn() -> bool,
     cooldown: &mut Option<Duration>,
-) -> crate::Result<(Origin, Vec<Item>)> {
+) -> crate::Result<(Remote, Vec<Item>)> {
     let deadline = Instant::now() + TIMEOUT;
-    let (owner, repo) = local_repository(input, deadline, &cancelled)?;
-    let origin = Origin { owner, repo };
+    let origin = local_repository(input, forges, deadline, &cancelled)?;
+    let access = forges.access(&origin)?;
     let timeout = deadline
         .checked_duration_since(Instant::now())
         .ok_or(Error::PrTimeout)?;
-    let response = crate::github::graphql(
+    let response = crate::forge::graphql(
         "repo_items",
-        token,
+        access,
         QUERY,
-        serde_json::json!({"owner": origin.owner, "repo": origin.repo, "count": LIMIT}),
+        &[
+            ("owner", Variable::Text(origin.owner())),
+            ("repo", Variable::Text(origin.name())),
+            ("count", Variable::Int(LIMIT as u64)),
+        ],
         timeout,
         cancelled,
         cooldown,
