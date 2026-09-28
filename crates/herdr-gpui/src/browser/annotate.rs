@@ -5,7 +5,10 @@
 //! bounded, stripped of control characters, and marked as quoted data in the
 //! prompt, which is pasted into an agent's terminal.
 use super::{Location, Tab};
-use crate::notifications::safe_text;
+use crate::{
+    agent_delivery::{code, fence},
+    notifications::safe_text,
+};
 use serde::Deserialize;
 use std::{path::PathBuf, sync::Arc};
 
@@ -370,25 +373,6 @@ pub(crate) fn reveal_script() -> &'static str {
 pub(crate) fn mode_script(regions: bool) -> String {
     let mode = if regions { "region" } else { "pick" };
     format!("window.__herdrAnnotate && window.__herdrAnnotate.mode({mode:?})")
-}
-
-/// Inline code that survives backticks in the text.
-fn code(text: &str) -> String {
-    if text.contains('`') {
-        format!("`` {text} ``")
-    } else {
-        format!("`{text}`")
-    }
-}
-
-/// A fence longer than any backtick run in the text.
-fn fence(text: &str) -> String {
-    let longest = text
-        .split(|c| c != '`')
-        .map(str::len)
-        .max()
-        .unwrap_or_default();
-    "`".repeat(longest.max(2) + 1)
 }
 
 /// The prompt an agent receives: the page, then each note with the part of

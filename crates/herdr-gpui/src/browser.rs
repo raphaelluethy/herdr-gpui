@@ -30,7 +30,7 @@ mod view_tests;
 
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use annotate_view::Annotations;
-pub(crate) use feedback::Feedback;
+pub(crate) use feedback::{Batch, Feedback};
 pub(crate) use group_motion::Fold;
 #[cfg(test)]
 pub(crate) use groups::GroupIds;

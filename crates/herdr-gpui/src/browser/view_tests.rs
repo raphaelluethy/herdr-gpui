@@ -759,16 +759,16 @@ mod notes {
         cx.update(|_, cx| {
             view.update(cx, |view, cx| {
                 view.send_notes(&tab, cx);
-                assert_eq!(view.browser.annotations.delivering(), 1);
+                assert_eq!(view.deliveries.len(), 1);
                 view.poll_deliveries(cx);
-                assert_eq!(view.browser.annotations.delivering(), 1, "held while busy");
+                assert_eq!(view.deliveries.len(), 1, "held while busy");
             });
         });
         assert!(kept(cx).is_none());
         with_agent(&view, cx, "idle");
         cx.update(|_, cx| view.update(cx, |view, cx| view.poll_deliveries(cx)));
         view.read_with(cx, |view, _| {
-            assert_eq!(view.browser.annotations.delivering(), 0);
+            assert_eq!(view.deliveries.len(), 0);
             assert_eq!(view.browser.annotations.queued(tab.id), 0);
         });
         assert!(kept(cx).is_some_and(|text| text.contains("Make it blue")));
@@ -792,7 +792,7 @@ mod notes {
             view.update(cx, |view, cx| {
                 view.send_notes(&tab, cx);
                 view.poll_deliveries(cx);
-                assert_eq!(view.browser.annotations.delivering(), 0);
+                assert_eq!(view.deliveries.len(), 0);
             });
         });
         assert!(kept(cx).is_some_and(|text| text.contains("Make it blue")));
@@ -808,7 +808,7 @@ mod notes {
                 view.send_notes(&tab, cx);
                 // Deadline not reached: still held.
                 view.poll_deliveries(cx);
-                assert_eq!(view.browser.annotations.delivering(), 1);
+                assert_eq!(view.deliveries.len(), 1);
             });
         });
         // The pane closing sends them to `browser feedback` rather than nowhere.
@@ -819,7 +819,7 @@ mod notes {
                 shown.agents.clear();
                 view.live.snapshot = Some(Arc::new(shown));
                 view.poll_deliveries(cx);
-                assert_eq!(view.browser.annotations.delivering(), 0);
+                assert_eq!(view.deliveries.len(), 0);
             });
         });
         assert!(kept(cx).is_some());

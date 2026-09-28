@@ -167,6 +167,8 @@ pub(crate) struct HerdrWindow {
     /// The daemon's prefix was typed, so the next keystroke completes a chord.
     pub(crate) prefix_armed: bool,
     pub(crate) _prefix_interceptor: Subscription,
+    /// Notes and reviews on their way to an agent's pane.
+    pub(crate) deliveries: crate::agent_delivery::Deliveries,
 }
 
 /// See `HerdrWindow::surface_signal`.
@@ -264,6 +266,7 @@ impl HerdrWindow {
         self.reconcile_group_terminals(cx);
         self.save_group_layouts(cx);
         self.poll_browser(window, cx);
+        self.poll_deliveries(cx);
         self.offer_browser_skill(window, cx);
         self.poll_sessions(cx);
         self.flush_scrollbar(cx);
@@ -462,6 +465,7 @@ impl HerdrWindow {
             _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
             prefix_armed: false,
             _prefix_interceptor: Self::intercept_prefix(window, cx),
+            deliveries: Default::default(),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
                 if !this.active {
