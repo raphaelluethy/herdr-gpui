@@ -1,4 +1,9 @@
-use crate::{HerdrWindow, config::Theme, menu::Page, search_input::SearchInput};
+use crate::{
+    HerdrWindow,
+    config::{Theme, Themes},
+    menu::Page,
+    search_input::SearchInput,
+};
 use gpui::{prelude::*, *};
 
 pub(super) struct ThemePicker {
@@ -17,6 +22,8 @@ pub(super) struct ThemePicker {
     loaded: Option<String>,
     accepting: bool,
     saving: bool,
+    /// The `theme` value being saved, and the mode it was chosen in.
+    saving_as: Option<(String, bool)>,
     // Keep the slot across dismiss/reopen: blocking I/O cannot be cancelled by
     // dropping a GPUI task. Only its completion may release the slot.
     in_flight: Option<(u64, u64)>,
@@ -81,6 +88,7 @@ impl HerdrWindow {
                 loaded: None,
                 accepting: false,
                 saving: false,
+                saving_as: None,
                 in_flight: None,
                 window: window.window_handle(),
                 _subscription: subscription,
@@ -96,15 +104,16 @@ impl HerdrWindow {
             .iter()
             .map(|name| (*name).into())
             .collect();
-        if !picker.names.contains(&self.config.theme) {
-            picker.names.push(self.config.theme.clone());
+        let current = self.current_theme_name();
+        if !picker.names.contains(&current) {
+            picker.names.push(current.clone());
         }
         picker.names.sort();
         picker.filter("");
         picker.selected = picker
             .filtered
             .iter()
-            .position(|name| name == &self.config.theme)
+            .position(|name| name == &current)
             .unwrap_or(0);
         picker.search.update(cx, |input, cx| {
             input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
@@ -143,6 +152,7 @@ impl HerdrWindow {
         result: crate::Result<Vec<String>>,
         cx: &mut Context<Self>,
     ) {
+        let current = self.current_theme_name();
         let Some(picker) = &mut self.menu.themes else {
             return;
         };
@@ -154,8 +164,8 @@ impl HerdrWindow {
             Ok(mut names) => {
                 // Theme directories are process-wide, not picker-session state.
                 // Reuse a running scan on reopen, adding the current explicit selection.
-                if !names.contains(&self.config.theme) {
-                    names.push(self.config.theme.clone());
+                if !names.contains(&current) {
+                    names.push(current);
                     names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
                 }
                 let selected = picker.filtered.get(picker.selected).cloned();
@@ -176,6 +186,30 @@ impl HerdrWindow {
             self.preview_picker_selection(cx);
         }
         cx.notify();
+    }
+
+    /// The theme the current mode uses, which the picker lists as current
+    /// and replaces: one half of a light/dark pair, or the single theme.
+    fn current_theme_name(&self) -> String {
+        self.config.theme_names().map_or_else(
+            |_| self.config.theme.clone(),
+            |names| names.pick(self.dark).to_owned(),
+        )
+    }
+
+    /// Points an open preview's cancel at `theme`, for a mode switch while
+    /// the picker is open. Returns whether a preview was open.
+    pub(super) fn retarget_theme_preview(&mut self, theme: &Theme) -> bool {
+        let Some(baseline) = self
+            .menu
+            .themes
+            .as_mut()
+            .and_then(|picker| picker.baseline.as_mut())
+        else {
+            return false;
+        };
+        *baseline = theme.clone();
+        true
     }
 
     pub(super) fn theme_save_in_flight(&self) -> bool {
@@ -281,14 +315,21 @@ impl HerdrWindow {
         picker.saving = saving;
         picker.in_flight = Some(token);
         let window = picker.window;
+        let value = if saving {
+            // A pair keeps the other mode's theme.
+            let value = self.config.theme_choosing(self.dark, &name);
+            picker.saving_as = value.as_ref().ok().map(|value| (value.clone(), self.dark));
+            Some(value)
+        } else {
+            None
+        };
         let mut config = self.config.clone();
-        config.theme = name.clone();
+        config.theme = name;
         let theme = self.theme.clone();
         let task = cx.background_executor().spawn(async move {
-            if saving {
-                config.save_theme(&name).map(|()| theme)
-            } else {
-                config.theme()
+            match value {
+                Some(value) => config.save_theme(&value?).map(|()| theme),
+                None => config.theme(),
             }
         });
         cx.spawn(async move |this, cx| {
@@ -318,6 +359,7 @@ impl HerdrWindow {
         }
         picker.in_flight = None;
         picker.saving = false;
+        let saved_as = picker.saving_as.take();
         if picker.baseline.is_none() || token != (picker.session, picker.request) {
             self.drive_picker_load(cx);
             return;
@@ -330,8 +372,21 @@ impl HerdrWindow {
                     input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx)
                 });
                 if saving {
-                    if let Some(name) = &picker.desired {
-                        self.config.theme = name.clone();
+                    // Recorded when the save began, so a mode switch while it
+                    // ran still updates the half that was chosen.
+                    let saved_as = saved_as.or_else(|| {
+                        let name = picker.desired.as_ref()?;
+                        let value = self.config.theme_choosing(self.dark, name).ok()?;
+                        Some((value, self.dark))
+                    });
+                    if let Some((value, dark)) = saved_as {
+                        self.config.theme = value;
+                        let paired = self.config.theme_names().is_ok_and(|names| names.paired);
+                        match (paired, dark) {
+                            (false, _) => self.themes = Themes::single(self.theme.clone()),
+                            (true, true) => self.themes.dark = self.theme.clone(),
+                            (true, false) => self.themes.light = self.theme.clone(),
+                        }
                     }
                     crate::log_window::set_appearance(&self.config, &self.theme, cx);
                     picker.baseline = None;
@@ -468,11 +523,12 @@ impl HerdrWindow {
                             let Some(picker) = &this.menu.themes else {
                                 return Vec::new();
                             };
+                            let current_name = this.current_theme_name();
                             range
                                 .map(|index| {
                                     let name = picker.filtered[index].clone();
                                     let selected = index == picker.selected;
-                                    let current = name == this.config.theme;
+                                    let current = name == current_name;
                                     div()
                                         .id(index)
                                         .debug_selector(move || format!("theme-row-{index}"))
@@ -1009,6 +1065,64 @@ mod tests {
                 assert_eq!(view.theme, Theme::builtin("Nord").unwrap());
                 view.dismiss_menu(window, cx);
                 assert_eq!(view.theme, Theme::builtin("Nord").unwrap());
+            })
+        });
+    }
+
+    /// With a light/dark pair, the picker shows and replaces the theme of the
+    /// mode in effect and keeps the other; a mode switch during a preview
+    /// changes what cancelling returns to.
+    #[gpui::test]
+    fn picking_with_a_pair_replaces_the_current_modes_half(cx: &mut TestAppContext) {
+        let latte = Theme::builtin("Catppuccin Latte").unwrap();
+        let nord = Theme::builtin("Nord").unwrap();
+        let dracula = Theme::builtin("Dracula").unwrap();
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.config.theme = "light:Catppuccin Latte,dark:Nord".into();
+                view.themes = Themes {
+                    light: latte.clone(),
+                    dark: nord.clone(),
+                };
+                view.dark = true;
+                view.theme = nord.clone();
+                view.open_theme_picker(window, cx);
+                assert_eq!(view.current_theme_name(), "Nord");
+                let picker = view.menu.themes.as_ref().unwrap();
+                assert_eq!(picker.filtered[picker.selected], "Nord");
+
+                // Switching to light mid-preview keeps the preview up, and
+                // cancelling it shows the light theme.
+                let picker = view.menu.themes.as_mut().unwrap();
+                picker.filtered = vec!["Dracula".into()];
+                picker.selected = 0;
+                view.preview_picker_selection(cx);
+                assert_eq!(view.theme, dracula);
+                view.config.appearance = crate::config::Appearance::Light;
+                view.sync_appearance(window, cx);
+                assert_eq!(view.theme, dracula);
+                view.dismiss_menu(window, cx);
+                assert_eq!(view.theme, latte);
+
+                // Back in dark mode, accepting Dracula replaces only its half.
+                view.config.appearance = crate::config::Appearance::Dark;
+                view.sync_appearance(window, cx);
+                assert_eq!(view.theme, nord);
+                view.open_theme_picker(window, cx);
+                let picker = view.menu.themes.as_mut().unwrap();
+                picker.filtered = vec!["Dracula".into()];
+                picker.selected = 0;
+                view.preview_picker_selection(cx);
+                let picker = view.menu.themes.as_mut().unwrap();
+                let token = (picker.session, picker.request);
+                picker.in_flight = Some(token);
+                view.apply_picker_theme("Dracula", cx);
+                view.finish_picker_load(token, true, Ok(dracula.clone()), window, cx);
+                assert_eq!(view.config.theme, "light:Catppuccin Latte,dark:Dracula");
+                assert_eq!(view.themes.light, latte);
+                assert_eq!(view.themes.dark, dracula);
+                assert_eq!(view.theme, dracula);
             })
         });
     }

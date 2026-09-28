@@ -314,10 +314,21 @@ answers the programs' color queries (OSC 10, 11, and 4) and color-scheme reports
 (DSR 996 and mode 2031) with them while this window is its foreground client. A
 shell prompt, editor, or agent that asks the terminal therefore follows the
 forced mode rather than the operating system's. It cannot change what a program
-reads from the OS directly, such as macOS `defaults`. The setting does not pick
-the theme; choose a light or dark one to match. On macOS the forced mode also
-drives the native window frame; GPUI has no such override on Linux or Windows,
-where the app draws its own frame from the theme.
+reads from the OS directly, such as macOS `defaults`. On macOS the forced mode
+also drives the native window frame; GPUI has no such override on Linux or
+Windows, where the app draws its own frame from the theme.
+
+To have the app's own colors switch too, pair a theme for each mode, in
+Ghostty's syntax:
+
+```toml
+theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"
+```
+
+Every window shows the current mode's theme and swaps when the mode changes,
+whether forced or following the system. The theme picker lists and replaces the
+current mode's half and keeps the other. A single theme stays as it is in both
+modes, so pick a light or dark one to match.
 
 Choose the sidebar layout from **View > Layout**, which lists every layout,
 checks the one in use, switches at once, and saves the choice to

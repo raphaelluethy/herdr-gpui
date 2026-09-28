@@ -106,8 +106,8 @@ impl HerdrWindow {
             move || {
                 let mut config = Config::load()?;
                 config.resolve_font_fallbacks(|| text_system.all_font_names());
-                let theme = config.theme()?;
-                Ok((config, theme))
+                let themes = config.themes()?;
+                Ok((config, themes))
             },
             cx,
         );
@@ -115,7 +115,7 @@ impl HerdrWindow {
 
     pub(crate) fn load_gui_config_with(
         &mut self,
-        load: impl FnOnce() -> crate::Result<(Config, crate::config::Theme)> + Send + 'static,
+        load: impl FnOnce() -> crate::Result<(Config, crate::config::Themes)> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
         if self.config_load.is_some() || self.font_size_saves.is_busy() {
@@ -129,13 +129,13 @@ impl HerdrWindow {
                 this.config_load_revision = this.config_load_revision.wrapping_add(1);
                 // Apply a coherent pair only after both have loaded successfully.
                 match loaded {
-                    Ok((mut config, theme)) => {
+                    Ok((mut config, themes)) => {
                         // A reload discards session zoom; queued Settings edits
                         // remain visible but do not become the saved baseline yet.
                         this.configured_terminal_size = config.terminal.size;
                         cx.set_global(crate::app::InitialAppearance {
                             config: config.clone(),
-                            theme: theme.clone(),
+                            themes: themes.clone(),
                             error: None,
                         });
                         if config.appearance != this.config.appearance {
@@ -161,7 +161,9 @@ impl HerdrWindow {
                             this.menu.page.is_some() || this.toasts_hidden,
                             std::time::Instant::now(),
                         );
-                        this.theme = theme;
+                        // A newly forced mode is picked up by the next sync.
+                        this.theme = themes.pick(this.dark).clone();
+                        this.themes = themes;
                         crate::log_window::set_appearance(&this.config, &this.theme, cx);
                         this.wheel = Default::default();
                         this.last_queued_options = None;
@@ -595,8 +597,8 @@ mod tests {
                     config.layout.sidebar_gap = 16.;
                     config.layout.mode =
                         crate::config::LayoutMode::from(crate::config::Density::Compact);
-                    let theme = config.theme()?;
-                    Ok((config, theme))
+                    let themes = config.themes()?;
+                    Ok((config, themes))
                 },
                 cx,
             )
@@ -654,8 +656,8 @@ mod tests {
                             show_agents,
                             ..Default::default()
                         };
-                        let theme = config.theme()?;
-                        Ok((config, theme))
+                        let themes = config.themes()?;
+                        Ok((config, themes))
                     },
                     cx,
                 );
@@ -717,8 +719,8 @@ mod tests {
                         theme: "Nord".into(),
                         ..Default::default()
                     };
-                    let theme = config.theme()?;
-                    Ok((config, theme))
+                    let themes = config.themes()?;
+                    Ok((config, themes))
                 },
                 cx,
             );

@@ -1009,6 +1009,7 @@ impl Config {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
             }
+            ThemeNames::parse(&theme)?;
             config.theme = theme;
         }
         config.confirm_close_tab = settings.confirm_close_tab.unwrap_or(true);
@@ -1081,9 +1082,11 @@ impl Config {
                 }
             }
         }
-        let selected = self.theme.trim();
-        if Path::new(selected).is_absolute() || selected.starts_with("~/") {
-            names.push(self.theme.clone());
+        let selected = self.theme_names()?;
+        for name in [selected.light, selected.dark] {
+            if Path::new(name).is_absolute() || name.starts_with("~/") {
+                names.push(name.to_owned());
+            }
         }
         names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
         names.dedup();
@@ -1105,7 +1108,7 @@ impl Config {
             theme: name.into(),
             ..self.clone()
         };
-        selected.theme()?;
+        selected.themes()?;
         let result = (|| -> Result<()> {
             let text = match fs::read_to_string(path) {
                 Ok(text) => text,
@@ -1284,15 +1287,59 @@ impl Config {
         result.map_err(|error| error.at_path(path))
     }
 
+    /// The theme `theme` names, when it names a single one, as the theme
+    /// picker's candidates do. A light/dark pair needs [`Self::themes`].
     pub fn theme(&self) -> Result<Theme> {
         self.theme_with_directories(theme_directories)
+    }
+
+    /// The light and dark themes `theme` selects, each resolved once.
+    pub fn themes(&self) -> Result<Themes> {
+        self.themes_with_directories(theme_directories)
+    }
+
+    /// Which theme each mode uses.
+    pub fn theme_names(&self) -> Result<ThemeNames<'_>> {
+        ThemeNames::parse(&self.theme)
+    }
+
+    /// The `theme` value after choosing `name` while in the given mode. A
+    /// pair keeps the other mode's theme; a single theme is replaced whole.
+    pub fn theme_choosing(&self, dark: bool, name: &str) -> Result<String> {
+        let names = self.theme_names()?;
+        Ok(match (names.paired, dark) {
+            (false, _) => name.to_owned(),
+            (true, true) => format!("light:{},dark:{name}", names.light),
+            (true, false) => format!("light:{name},dark:{}", names.dark),
+        })
+    }
+
+    fn themes_with_directories(
+        &self,
+        directories: impl Fn() -> Result<Vec<PathBuf>>,
+    ) -> Result<Themes> {
+        let names = self.theme_names()?;
+        let dark = Self::named_theme(names.dark, &directories)?;
+        let light = if names.light == names.dark {
+            dark.clone()
+        } else {
+            Self::named_theme(names.light, &directories)?
+        };
+        Ok(Themes { light, dark })
     }
 
     fn theme_with_directories(
         &self,
         directories: impl FnOnce() -> Result<Vec<PathBuf>>,
     ) -> Result<Theme> {
-        let name = self.theme.trim();
+        Self::named_theme(&self.theme, directories)
+    }
+
+    fn named_theme(
+        name: &str,
+        directories: impl FnOnce() -> Result<Vec<PathBuf>>,
+    ) -> Result<Theme> {
+        let name = name.trim();
         if let Some(theme) = Theme::builtin(name) {
             return Ok(theme);
         }
@@ -1348,6 +1395,80 @@ fn write_config(path: &Path, text: &str) -> Result<()> {
         Ok(())
     })();
     result.map_err(|error| Error::from(error).at_path(path))
+}
+
+/// The theme names `theme` gives each mode: one name for both, or a pair in
+/// Ghostty's syntax, `light:Catppuccin Latte,dark:Catppuccin Mocha`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThemeNames<'a> {
+    pub light: &'a str,
+    pub dark: &'a str,
+    /// Whether the value names the modes separately, even the same theme.
+    pub paired: bool,
+}
+
+impl<'a> ThemeNames<'a> {
+    fn parse(value: &'a str) -> Result<Self> {
+        let value = value.trim();
+        if !value.starts_with("light:") && !value.starts_with("dark:") {
+            return Ok(Self {
+                light: value,
+                dark: value,
+                paired: false,
+            });
+        }
+        let (mut light, mut dark) = (None, None);
+        for part in value.split(',') {
+            let part = part.trim();
+            let (slot, name) = if let Some(name) = part.strip_prefix("light:") {
+                (&mut light, name)
+            } else if let Some(name) = part.strip_prefix("dark:") {
+                (&mut dark, name)
+            } else {
+                return Err(Error::InvalidThemePair);
+            };
+            let name = name.trim();
+            if name.is_empty() || slot.replace(name).is_some() {
+                return Err(Error::InvalidThemePair);
+            }
+        }
+        let (Some(light), Some(dark)) = (light, dark) else {
+            return Err(Error::InvalidThemePair);
+        };
+        Ok(Self {
+            light,
+            dark,
+            paired: true,
+        })
+    }
+
+    /// The name the given mode uses.
+    pub fn pick(self, dark: bool) -> &'a str {
+        if dark { self.dark } else { self.light }
+    }
+}
+
+/// The resolved theme for each mode; both are the same theme unless `theme`
+/// pairs two.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Themes {
+    pub light: Theme,
+    pub dark: Theme,
+}
+
+impl Themes {
+    /// One theme for both modes.
+    pub fn single(theme: Theme) -> Self {
+        Self {
+            light: theme.clone(),
+            dark: theme,
+        }
+    }
+
+    /// The theme the given mode shows.
+    pub fn pick(&self, dark: bool) -> &Theme {
+        if dark { &self.dark } else { &self.light }
+    }
 }
 
 /// Colors are packed 24-bit RGB, without an alpha channel.
@@ -2143,6 +2264,114 @@ mod tests {
             Some("Iv1.fixture")
         );
         assert!(saved.contains("# no theme"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_theme_pair_names_one_theme_per_mode() -> anyhow::Result<()> {
+        let names = |value: &str| {
+            Config {
+                theme: value.into(),
+                ..Config::default()
+            }
+            .theme_names()
+            .map(|names| (names.light.to_owned(), names.dark.to_owned(), names.paired))
+        };
+        let own = |light: &str, dark: &str, paired| (light.to_owned(), dark.to_owned(), paired);
+        assert_eq!(names("Nord")?, own("Nord", "Nord", false));
+        assert_eq!(
+            names("  ~/my theme ")?,
+            own("~/my theme", "~/my theme", false)
+        );
+        // Either order, with Ghostty's spacing and names that hold spaces.
+        for value in [
+            "light:Catppuccin Latte,dark:Catppuccin Mocha",
+            "dark: Catppuccin Mocha , light: Catppuccin Latte",
+        ] {
+            assert_eq!(
+                names(value)?,
+                own("Catppuccin Latte", "Catppuccin Mocha", true)
+            );
+        }
+        assert_eq!(names("light:Nord,dark:Nord")?, own("Nord", "Nord", true));
+        for value in [
+            "light:Nord",
+            "dark:Nord,dark:Dracula",
+            "light:,dark:Nord",
+            "light:Nord,dark:Dracula,Default",
+            "light:Nord;dark:Dracula",
+        ] {
+            assert!(
+                matches!(names(value), Err(Error::InvalidThemePair)),
+                "{value}"
+            );
+            // A malformed pair is rejected when the config loads, too.
+            assert!(
+                Config::parse(&format!("theme = '{value}'")).is_err(),
+                "{value}"
+            );
+        }
+        let themes = Config::parse("theme = 'light:Catppuccin Latte,dark:Nord'")?.themes()?;
+        assert_eq!(
+            Some(themes.light.clone()),
+            Theme::builtin("Catppuccin Latte")
+        );
+        assert_eq!(Some(themes.dark.clone()), Theme::builtin("Nord"));
+        assert_eq!(themes.pick(false), &themes.light);
+        assert_eq!(themes.pick(true), &themes.dark);
+        assert_eq!(
+            Config::parse("theme = 'Nord'")?.themes()?,
+            Themes::single(Theme::builtin("Nord").context("builtin")?)
+        );
+        // An unknown half fails the whole pair.
+        assert!(
+            Config::parse("theme = 'light:Nord,dark:../nope'")?
+                .themes()
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn choosing_a_theme_replaces_only_the_current_modes_half() -> anyhow::Result<()> {
+        let pair = Config::parse("theme = 'light:Catppuccin Latte,dark:Nord'")?;
+        assert_eq!(
+            pair.theme_choosing(true, "Dracula")?,
+            "light:Catppuccin Latte,dark:Dracula"
+        );
+        assert_eq!(
+            pair.theme_choosing(false, "Default")?,
+            "light:Default,dark:Nord"
+        );
+        let single = Config::parse("theme = 'Nord'")?;
+        for dark in [false, true] {
+            assert_eq!(single.theme_choosing(dark, "Dracula")?, "Dracula");
+        }
+        // The saved pair round-trips and is validated whole.
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let value = pair.theme_choosing(true, "Dracula")?;
+        pair.save_theme_path(&value, &path)?;
+        let saved = Config::parse(&fs::read_to_string(&path)?)?.themes()?;
+        assert_eq!(Some(saved.dark), Theme::builtin("Dracula"));
+        assert_eq!(Some(saved.light), Theme::builtin("Catppuccin Latte"));
+        let before = fs::read_to_string(&path)?;
+        assert!(
+            pair.save_theme_path("light:Nord,dark:../nope", &path)
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&path)?, before);
+        // A path half is still offered by the picker.
+        let custom = temp.0.join("custom");
+        fs::write(&custom, "background=112233")?;
+        let custom = custom.to_str().context("non-UTF8 temporary path")?;
+        let config = Config::parse(&format!("theme = 'light:{custom},dark:Nord'"))?;
+        assert_eq!(config.themes()?.light.background, 0x112233);
+        assert!(
+            config
+                .available_themes_in(&[])?
+                .contains(&custom.to_owned())
+        );
         Ok(())
     }
 

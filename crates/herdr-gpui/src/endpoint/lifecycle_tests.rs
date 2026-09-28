@@ -277,7 +277,7 @@ fn first_focus_claims_geometry_without_a_window_resize(cx: &mut gpui::TestAppCon
 /// shows, so each connection reports them, and again whenever they change.
 #[gpui::test]
 fn the_host_theme_follows_the_forced_appearance_and_the_theme(cx: &mut gpui::TestAppContext) {
-    use crate::config::{Appearance, Theme};
+    use crate::config::{Appearance, Theme, Themes};
     use std::sync::Mutex;
 
     let (endpoint, mut server) = connected_endpoint("host-theme");
@@ -339,7 +339,12 @@ fn the_host_theme_follows_the_forced_appearance_and_the_theme(cx: &mut gpui::Tes
         });
     };
     let report = |cx: &mut gpui::VisualTestContext| {
-        cx.update(|window, cx| view.update(cx, |view, _| view.report_host_theme(window)));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.sync_appearance(window, cx);
+                view.report_host_theme();
+            })
+        });
     };
     view.update(cx, |view, _| {
         view.endpoints = vec![endpoint];
@@ -359,16 +364,35 @@ fn the_host_theme_follows_the_forced_appearance_and_the_theme(cx: &mut gpui::Tes
     choose(Appearance::Light, cx);
     report(cx);
     expect(&mut server, false, &theme);
-    // A new theme is reported with the forced mode, not its own brightness.
+    // A theme pair shows, and reports, the theme of the mode in effect.
     let latte = Theme::builtin("Catppuccin Latte").unwrap();
-    choose(Appearance::Dark, cx);
-    view.update(cx, |view, _| view.theme = latte.clone());
+    let nord = Theme::builtin("Nord").unwrap();
+    view.update(cx, |view, _| {
+        view.themes = Themes {
+            light: latte.clone(),
+            dark: nord.clone(),
+        };
+        // Loading a config shows the current mode's theme.
+        view.theme = view.themes.pick(view.dark).clone();
+    });
     report(cx);
-    expect(&mut server, true, &latte);
+    expect(&mut server, false, &latte);
+    choose(Appearance::Dark, cx);
+    report(cx);
+    expect(&mut server, true, &nord);
+    view.read_with(cx, |view, _| assert_eq!(view.theme, nord));
+    // A single theme is reported with the forced mode, not its brightness.
+    choose(Appearance::Light, cx);
+    view.update(cx, |view, _| {
+        view.themes = Themes::single(nord.clone());
+        view.theme = nord.clone();
+    });
+    report(cx);
+    expect(&mut server, false, &nord);
     // A fresh connection has not heard it yet.
     view.update(cx, |view, _| view.reset_selected());
     report(cx);
-    expect(&mut server, true, &latte);
+    expect(&mut server, false, &nord);
     // Nothing else was queued: focus is the next message on the wire.
     view.update(cx, |view, _| {
         let handle = view.endpoints[0].connection.handle.as_ref().unwrap();
@@ -385,7 +409,12 @@ fn the_host_theme_follows_the_forced_appearance_and_the_theme(cx: &mut gpui::Tes
     saved.sort_by_key(|appearance| appearance.name());
     assert_eq!(
         saved,
-        vec![Appearance::Dark, Appearance::Dark, Appearance::Light]
+        vec![
+            Appearance::Dark,
+            Appearance::Dark,
+            Appearance::Light,
+            Appearance::Light
+        ]
     );
 }
 

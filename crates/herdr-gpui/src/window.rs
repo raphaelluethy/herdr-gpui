@@ -58,7 +58,12 @@ pub(crate) struct HerdrWindow {
     /// write straight to `config.terminal.size`, so this is what Reset Font
     /// Size restores; a session adjustment never reaches disk.
     pub(crate) configured_terminal_size: f32,
+    /// The theme on screen: the current mode's of `themes`, or a picker preview.
     pub(crate) theme: config::Theme,
+    /// Both modes' themes from the config.
+    pub(crate) themes: config::Themes,
+    /// Whether the app is in dark mode, forced or following the system.
+    pub(crate) dark: bool,
     pub(crate) config_load: Option<Task<()>>,
     pub(crate) font_size_saves: crate::font_sizes::FontSizeSaves,
     pub(crate) config_watch: Option<Task<()>>,
@@ -294,7 +299,8 @@ impl HerdrWindow {
         }
         self.resize();
         self.report_focus();
-        self.report_host_theme(window);
+        self.sync_appearance(window, cx);
+        self.report_host_theme();
         self.sync_window_title(window);
     }
 
@@ -351,9 +357,13 @@ impl HerdrWindow {
             .unwrap_or_default();
         let crate::app::InitialAppearance {
             config,
-            theme,
+            themes,
             error,
         } = appearance;
+        let dark = config
+            .appearance
+            .is_dark(|| appearance::system_is_dark(window));
+        let theme = themes.pick(dark).clone();
         let mut this = Self {
             sound: crate::sound::Service::default(),
             updater: updater::Updater::default(),
@@ -361,6 +371,8 @@ impl HerdrWindow {
             configured_terminal_size: config.terminal.size,
             config,
             theme,
+            themes,
+            dark,
             config_load: None,
             font_size_saves: Default::default(),
             config_watch: None,
