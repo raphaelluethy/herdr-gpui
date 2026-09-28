@@ -549,7 +549,8 @@ themes while keeping light themes light. It sits above the sidebar and tabs: 80p
 of traffic-light clearance, an empty flexible center, and a 40px upper-right slot.
 The slot centers a 16px circular user avatar with a 12px SVG in a 28px hover target, tinted from
 the theme foreground. This profile control opens native GitHub sign-in and shows
-the authenticated user's avatar when connected. It consumes clicks so
+the authenticated user's avatar when connected, or the `gh` account's avatar when
+[your own GitHub CLI](#using-your-own-gh-and-glab) provides access. It consumes clicks so
 double-clicking it does not invoke the title-bar action.
 The header and clearance remain in fullscreen so the body layout stays stable.
 Windows/Linux keep the existing native frame and do not render this header.
@@ -994,7 +995,8 @@ Windows setup) nothing is saved and the window says so.
   workspaces, local collapse arrows, branch details, and daemon-driven
   filled/hollow activity indicators taken from the daemon's own status, so the
   GUI and the terminal client always show the same dot. Each worktree row also
-  carries its cached pull request number and diff counts.
+  carries its cached pull request number (`!N` for a GitLab merge request) and,
+  where the forge reports them, diff counts.
 - Agents panel header ends with its sort, `grouped` or `priority`, which a
   click flips; an active agent view names itself there instead. Client-local
   and persisted beside the sidebar width, as in the terminal client.
@@ -1051,8 +1053,11 @@ Windows setup) nothing is saved and the window says so.
   Context menus and dialogs anchor to the pointer and clamp to the viewport.
   Rename trims surrounding whitespace and rejects blank labels inline.
   The PR tab supports fork pull requests: it fetches GitHub's PR head ref from
-  the repository's origin and creates a local `pr/<number>` branch. Existing
-  local branches are preserved; repository trust is not granted.
+  the repository's origin and creates a local `pr/<number>` branch. On a GitLab
+  origin the tab reads MR and lists open merge requests through `glab`; a fork's
+  merge request is fetched from `refs/merge-requests/<iid>/head` into a local
+  `mr/<iid>` branch. Existing local branches are preserved; repository trust is
+  not granted.
 - Open worktree... asynchronously lists the clicked parent's existing checkouts
   through `worktree.list`, including already-open and detached checkouts but
   excluding bare/prunable entries. Use Up/Down and Enter, the Open button, or
@@ -1080,11 +1085,14 @@ Windows setup) nothing is saved and the window says so.
   same focus flow as creation. Escape/outside click dismisses even while waiting;
   this does not cancel queued daemon work, but late replies cannot reopen the
   picker or steal this client's focus. All Git/filesystem work stays in Herdr.
-- Signed-in workspace menus include a compact, divided PR summary. The number/title
+- Workspace menus include a compact, divided PR summary whenever a forge is
+  reachable: the native GitHub sign-in, or an authenticated `gh` or `glab`
+  (see [Using your own gh and glab](#using-your-own-gh-and-glab)). The number/title
   is the last selectable menu action: click it or use arrows and Enter to open the
    validated URL. Cache-only menu opening shows prefetched results immediately,
    or loading for an initial miss; no separate Open/Refresh controls or O/R shortcuts.
-   One background Git/native HTTPS GraphQL worker refreshes the selected device's
+   One background worker (local Git, then native HTTPS GraphQL, `gh api graphql`,
+   or `glab api`, by the origin's forge) refreshes the selected device's
    eligible workspace metadata every 90 seconds, with a 128-entry LRU cache, 128 queued jobs, and
    alternating open/focused priority and round-robin scheduling. Failed refreshes
    retain successful data. Ordinary failures back off five minutes; auth/rate-limit
@@ -1092,7 +1100,7 @@ Windows setup) nothing is saved and the window says so.
    hints within five minutes to 24 hours. Auth/endpoint generations fence late results.
    Discovery uses the daemon repository key and exact branch to resolve a unique
    Git worktree, followed by common-directory/current-branch checks and an explicit
-   GitHub repository/head query. It never occupies the deletion dialog response slot.
+   repository/head query on the origin's forge. It never occupies the deletion dialog response slot.
    PR heads use the branch's configured upstream remote owner/repository and merge
    branch, so renamed local branches can identify fork PRs. Without an upstream,
    lookup uses the local branch name and requires the origin owner as before.
@@ -1137,7 +1145,9 @@ Windows setup) nothing is saved and the window says so.
   purple, and closed PRs red.
 - The top-right titlebar profile control starts native GitHub device sign-in on
   a signed-out click, shows the authenticated user's avatar, and offers Sign out
-  on right-click. Signed-out workspace menus have no GitHub section or requests.
+  on right-click. When `gh` provides access instead, a click opens the account
+  panel rather than starting device sign-in. With no native sign-in and no
+  signed-in `gh` or `glab`, workspace menus have no PR section or requests.
   The signed-out GitHub icon and connected avatar share a 20px size and subtle
   hover glow; authentication errors appear in the account panel, not a red border.
   It uses Herdr GPUI's public client ID `Iv23liurUcwxPjrdIFYT`, overridden by
@@ -1180,8 +1190,58 @@ Windows setup) nothing is saved and the window says so.
    focus to the terminal. Reopen the account panel to use the red Sign out action.
    Older versions saved only access tokens, so an expired legacy token needs
    one more sign-in to obtain a refresh token. Revoked or expired refresh tokens
-   also require sign-in. No CLI authentication is used. See
+   also require sign-in. The native sign-in itself never runs a CLI; using your
+   own authenticated `gh` or `glab` instead is described below. See
   [setup, cancellation, scopes, and sign-out](../../README.md#native-github-sign-in).
+- <a id="using-your-own-gh-and-glab"></a>**Using your own gh and glab.** An
+  authenticated [GitHub CLI](https://cli.github.com/) (`gh auth login`) can stand
+  in for the native sign-in, and an authenticated
+  [GitLab CLI](https://gitlab.com/gitlab-org/cli) (`glab auth login`) serves
+  GitLab origins, on gitlab.com and on every self-hosted host `glab auth status`
+  reports, nested groups (`group/subgroup/project`) included. Their credentials
+  never enter this process: the app runs `gh api graphql` (the same queries the
+  native path posts) or `glab api --hostname HOST`, addressing projects by encoded
+  path or numeric ID, and never runs `gh auth token`. PR badges, the workspace PR
+  summary, the Git dropdown's Create pull request, and the new-worktree PR and
+  issue tabs all work through them; GitLab items read MR and `!N`.
+  Precedence is set in the GUI config:
+
+  ```toml
+  [github]
+  cli = "auto"   # native sign-in first, then gh; "prefer": gh first; "off": never gh
+
+  [gitlab]
+  cli = "auto"   # glab for GitLab origins; "off": never glab
+  ```
+
+  A background probe (never on the UI thread, and never in headless windows)
+  finds each CLI on `PATH` or where Homebrew, Nix, or `~/.local/bin` installs it,
+  then runs `gh auth status --hostname github.com` and `gh api user`, or
+  `glab auth status` and `glab api user` per signed-in host (at most four). The
+  result is kept for five minutes and probed again when the account panel opens
+  or the config reloads. A missing CLI reads as not installed, never as an
+  error. The account panel says which CLI is in use and as whom ("Using GitHub
+  CLI as @login", "GitLab CLI as @login on gitlab.com"), or why one is not.
+  CLI children use the same deadline, output cap, and cancellation as Git
+  children, with stdout read apart from stderr, stdin closed, and `/` as the
+  working directory. They keep your own CLI environment (`GH_TOKEN`,
+  `GH_CONFIG_DIR`, `GITLAB_TOKEN`, `GLAB_CONFIG_DIR`, ...) but drop `GH_HOST`,
+  `GH_REPO`, and debug switches, and set `GH_PROMPT_DISABLED=1`, `NO_PROMPT=1`,
+  `NO_COLOR=1`, and a `cat` pager. Git children stay exactly as strict as before.
+  Failures are typed: not installed, not signed in (with the login command),
+  rate limited, or a request failure with a bounded, cleaned, and redacted line
+  of the CLI's own error. Rate limits and GraphQL `RATE_LIMITED`/`FORBIDDEN`
+  errors pause lookups for an hour, as native ones do; a CLI that stopped being
+  signed in pauses them for five minutes.
+  GitLab merge requests map onto the same summary: `opened`/`locked`, `closed`,
+  and `merged` lifecycles, drafts, the head pipeline as the checks line, and
+  `detailed_merge_status` as the merge status and review requirement. GitLab's
+  API reports no line counts, so GitLab rows, the titlebar, and menus show none
+  rather than `+0 -0`. Links are rebuilt from the verified project address, never
+  taken from a reply. Merge requests are opened into the project's default
+  branch. GitLab avatars are not downloaded, since they live on arbitrary hosts.
+  A CLI runs on this machine, so it also answers for saved SSH devices, whose
+  origins are resolved over SSH as before.
 - Workspace actions retain the clicked ID and boot, revalidate before queueing,
   and reject changed close-group membership. Reconnect clears dialogs. Queue
   errors remain in the dialog; daemon errors appear in the connection status bar.
@@ -1436,7 +1496,9 @@ These features are unavailable on Windows and say so rather than failing quietly
   stays disabled and reports that no standalone updater exists for this platform.
   Homebrew delegation is macOS-only regardless.
 - **Saved GitHub credentials.** Neither the Keychain nor the private `0600` file
-  exists here, so `GH_TOKEN` / `GITHUB_TOKEN` are the only sources of a token.
+  exists here, so `GH_TOKEN` / `GITHUB_TOKEN` are the only sources of a native
+  token. An authenticated `gh` or `glab` still works, since each keeps its own
+  credential.
 - **The avatar disk cache.** It depends on `openat`, `flock`, and POSIX
   ownership and mode checks, so avatars stay in memory for the process lifetime.
 

@@ -128,7 +128,8 @@ or live daemon has been exercised. Local
 connections use the named pipe the Windows daemon binds, and configuration and
 state follow its `%APPDATA%` / `%LOCALAPPDATA%` layout. Saved SSH
 hosts, in-app updates, saved GitHub credentials, and the avatar disk cache are
-unavailable and report that plainly; see
+unavailable and report that plainly; an authenticated `gh` or `glab` still
+provides pull and merge requests. See
 [the GUI README](crates/herdr-gpui/README.md#windows).
 
 Each release publishes `Herdr-VERSION-x86_64-pc-windows-msvc.zip` and
@@ -162,6 +163,11 @@ The daemon owns the terminals and all session state. The GUI attaches to the
 binary **client** socket, renders the surfaces it is sent, and sends semantic
 input back. Closing or detaching the GUI leaves the daemon and its terminals
 running.
+
+Pull requests come from GitHub through the app's own device sign-in, or
+through the `gh` or `glab` CLI you have already signed in; GitLab merge
+requests use `glab`. The CLI keeps its credential, and the app never reads it.
+See [Using your own gh and glab](crates/herdr-gpui/README.md#using-your-own-gh-and-glab).
 
 [Browser tabs](crates/herdr-gpui/README.md#browser-tabs) are the exception:
 Herdr has no browser panes, so web pages shown beside a workspace's terminals
