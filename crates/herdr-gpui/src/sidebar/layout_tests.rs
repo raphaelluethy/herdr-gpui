@@ -1194,6 +1194,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         prefix_armed: false,
         _prefix_interceptor: HerdrWindow::intercept_prefix(window, cx),
         deliveries: Default::default(),
+        review: crate::review::Review::new(cx),
     }
 }
 

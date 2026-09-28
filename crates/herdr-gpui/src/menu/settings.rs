@@ -273,7 +273,8 @@ impl HerdrWindow {
                 | Command::Quit
                 | Command::Logs
                 | Command::About
-                | Command::InstallBrowserSkill => 2,
+                | Command::InstallBrowserSkill
+                | Command::ToggleReviewPanel => 2,
                 Command::OpenNotificationTarget => 1,
             };
             groups[group].1.push((keys, info.label));

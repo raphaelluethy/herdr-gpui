@@ -47,6 +47,7 @@ mod presentation;
 mod pull_request;
 mod reorder;
 mod repo_items;
+mod review;
 mod search_input;
 mod sessions;
 mod sidebar;

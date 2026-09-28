@@ -11,6 +11,7 @@ use gpui::{prelude::*, *};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Row {
+    Review,
     Commit,
     Push,
     PullRequest,
@@ -19,6 +20,7 @@ pub(super) enum Row {
 impl Row {
     fn icon(self) -> &'static str {
         match self {
+            Self::Review => "icons/split.svg",
             Self::Commit => "icons/pencil.svg",
             Self::Push => "icons/chevron-up.svg",
             Self::PullRequest => "icons/git-branch.svg",
@@ -172,6 +174,14 @@ impl HerdrWindow {
             return Vec::new();
         }
         vec![
+            (
+                Row::Review,
+                if self.review.open {
+                    "Hide review panel".into()
+                } else {
+                    "Review changes".into()
+                },
+            ),
             (Row::Commit, "Commit...".into()),
             (Row::Push, "Push".into()),
             match self.git_open_pull_request() {
@@ -190,10 +200,16 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if row == Row::Review {
+            self.dismiss_menu(window, cx);
+            self.toggle_review(window, cx);
+            return;
+        }
         if self.git.running().is_some() {
             return;
         }
         match row {
+            Row::Review => {}
             Row::Commit => {
                 self.menu.page = Some(Page::GitCommit);
                 self.menu.input = Some(DialogInput::default());
@@ -970,7 +986,20 @@ mod tests {
                     .into_iter()
                     .map(|(_, label)| label)
                     .collect();
-                assert_eq!(rows, ["Commit...", "Push", "Create pull request"]);
+                assert_eq!(
+                    rows,
+                    ["Review changes", "Commit...", "Push", "Create pull request"]
+                );
+                // The review row opens the panel and closes the popup; it
+                // does not need Git to be idle.
+                view.activate_git_row(Row::Review, window, cx);
+                assert!(view.review.open);
+                assert_eq!(view.menu.page, None);
+                view.open_git_menu(point(px(900.), px(20.)), window, cx);
+                assert_eq!(
+                    view.git_rows().first().map(|(_, label)| label.clone()),
+                    Some("Hide review panel".into())
+                );
                 view.activate_git_row(Row::Commit, window, cx);
                 assert_eq!(view.menu.page, Some(Page::GitCommit));
                 assert!(view.menu.input.is_some(), "the dialog opens with a field");

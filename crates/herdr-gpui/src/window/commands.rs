@@ -239,6 +239,10 @@ impl HerdrWindow {
                 self.split_active_group(window, cx);
                 return;
             }
+            Command::ToggleReviewPanel => {
+                self.toggle_review(window, cx);
+                return;
+            }
             Command::InstallBrowserSkill => {
                 self.install_browser_skill(window, cx);
                 return;

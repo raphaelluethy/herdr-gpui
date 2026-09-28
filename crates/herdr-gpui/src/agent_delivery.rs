@@ -84,6 +84,7 @@ impl Deliveries {
         dropped
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }

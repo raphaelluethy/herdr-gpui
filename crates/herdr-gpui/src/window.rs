@@ -169,6 +169,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) _prefix_interceptor: Subscription,
     /// Notes and reviews on their way to an agent's pane.
     pub(crate) deliveries: crate::agent_delivery::Deliveries,
+    /// The review panel beside the terminal.
+    pub(crate) review: crate::review::Review,
 }
 
 /// See `HerdrWindow::surface_signal`.
@@ -298,6 +300,9 @@ impl HerdrWindow {
             cx.notify();
         }
         if self.update_git() {
+            cx.notify();
+        }
+        if self.update_review() {
             cx.notify();
         }
         if self.update_usage() {
@@ -466,6 +471,7 @@ impl HerdrWindow {
             prefix_armed: false,
             _prefix_interceptor: Self::intercept_prefix(window, cx),
             deliveries: Default::default(),
+            review: crate::review::Review::new(cx),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
                 if !this.active {

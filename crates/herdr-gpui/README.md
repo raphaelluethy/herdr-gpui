@@ -952,6 +952,82 @@ mkdir -p ~/.claude/skills/herdr-gpui-browser
 herdr-gpui browser skill > ~/.claude/skills/herdr-gpui-browser/SKILL.md
 ```
 
+## Review Panel
+
+Cmd-Shift-G (`toggle_review_panel`), **View > Toggle Review Panel**, the
+command palette, or **Review changes** in the title bar's Git popup opens a
+dock to the right of the terminal that reviews the focused workspace's
+checkout, modeled on Zed's git panel and project diff. The terminal shrinks to
+make room and follows the new size; drag the panel's left edge to resize it,
+double-click the edge to restore the default width.
+
+- Only a local checkout is reviewed: the same owned local daemon and verified
+  worktree the Git popup acts on. Remote and SSH workspaces show a note saying
+  the panel does not support them yet.
+- **Uncommitted** lists the working tree against HEAD, in the sections
+  Conflicts, Tracked, and Untracked, with the status letter colored as Zed
+  colors it, the file name, and its folder in muted text. Each tracked or
+  untracked row has a checkbox that stages (`git add`) or unstages (`git
+  restore --staged`; `git rm --cached` before the first commit) that file; a
+  section header's checkbox stages or unstages the section, and **Stage all**
+  / **Unstage all** in the header does the whole tree. Staging is an explicit
+  action, run once and never retried; there is no discard or restore.
+- **Branch** lists the working tree against the merge base with the default
+  branch: origin's default branch when Git knows it, else the first of
+  `origin/main`, `origin/master`, `main`, `master` that exists. The header
+  names the base. Nothing can be staged in this view.
+- Selecting a file, by click or with the up and down keys while the panel has
+  focus, shows its unified diff below the list with old and new line numbers,
+  added and removed line washes, and hunk headers. Untracked files show as all
+  added, deleted files as all removed, binary files, mode changes, and renames
+  as a notice. Diffs are bounded: 5000 rows, 400 characters a line, 1 MiB of
+  an untracked file, and 2 MiB of Git output; a cut diff says "Diff truncated".
+  Space stages or unstages the selected file; Escape returns the keyboard to
+  the terminal. Keys reach the panel only while it has focus, so typing in the
+  terminal is never taken.
+- The file list refreshes when the panel opens, on **Refresh**, after staging,
+  after a title bar commit or push, and every five seconds while the panel
+  shows and the window is active. A result for a checkout, view, or file no
+  longer shown is dropped rather than painted.
+- The **Open** button in a row or the diff header opens the file in the
+  system's default application; **Reveal** shows it in the file manager. Both
+  resolve the path under the checkout Git verified and refuse a path that
+  would leave it; a deleted file has nothing to open.
+
+### Review Comments
+
+Comments are written on the diff and sent to an agent in one of your panes.
+
+- Hover a line and click its **+** to start a comment on it; drag, or
+  Shift-click another line, to cover a range. A range stops at a hunk header
+  and at 60 lines. The composer opens under the last covered line with
+  "Lines 12-18"; Enter saves the comment, Escape drops it. Saved comments show
+  under their lines with edit and delete buttons, and all of them in the
+  footer's list, which names each file and line range.
+- A comment remembers the diff lines it was written on. When the file's diff
+  changes it follows those lines wherever they moved, and when they are gone
+  it is kept but marked **stale** in the footer's list. Comments belong to
+  their checkout, stay through toggling the panel and switching views, and are
+  bounded: 50 per checkout, 2000 characters each, one line, cleaned of control
+  characters.
+- **Send to <agent> (N)** hands the comments to an agent. The chevron beside
+  it lists every agent Herdr reports, the reviewed workspace's agents first
+  and its focused one on top, each with its status dot and tab; the button
+  sends to the one on top unless you pick another. The prompt names the
+  repository, branch, and view, then each comment as `path:L12-L18` (`(old)`
+  for lines of the old side), the covered diff lines fenced as quoted data,
+  and the comment; it is bounded at 64 KiB and says how many comments were
+  left out. **Copy** puts the same prompt on the clipboard and keeps the
+  comments; **Clear** drops them.
+- Sending shares the browser notes' delivery: the prompt is pasted into the
+  agent's pane and submitted once Herdr reports the agent idle, or after two
+  minutes of it still working. It is never typed into a pane where Herdr sees
+  no running agent, since Enter there would run it in a shell, nor into an
+  agent asking you a question; then, or when no agent is open, or the pane
+  cannot be reached, it is copied to the clipboard and the flash says so. The
+  comments are cleared when you press Send, as browser notes are, so a second
+  Send cannot repeat them.
+
 ## macOS Dock Badge
 
 The Dock icon shows the number of agents reporting `Done` (finished) or `Blocked`
@@ -1339,7 +1415,8 @@ Windows setup) nothing is saved and the window says so.
   prefix. Herdr validates its own file, so a daemon entry the GUI cannot
   express (a `hyper` modifier, a direct key without cmd, ctrl, alt, or fn) is
   skipped rather than rejected. Saving either file rebinds live.
-- Cmd-B toggles sidebar visibility locally without changing daemon state.
+- Cmd-B toggles sidebar visibility locally without changing daemon state, and
+  Cmd-Shift-G the [review panel](#review-panel).
   Cmd-, opens Settings; Cmd-/ opens the grouped native shortcut reference.
   Native shortcut labels and keycaps come from the shared `controls::COMMANDS`
   catalog, overridden by the config's `[keybindings]` table, with Cmd-V semantic

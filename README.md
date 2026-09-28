@@ -173,7 +173,10 @@ See [Using your own gh and glab](crates/herdr-gpui/README.md#using-your-own-gh-a
 Herdr has no browser panes, so web pages shown beside a workspace's terminals
 belong to the GUI alone. Agents in your panes open them with
 `herdr-gpui browser open URL`, which reaches the running app over a local
-socket of its own.
+socket of its own. The [review panel](crates/herdr-gpui/README.md#review-panel)
+is the GUI's too: it runs Git against the focused local checkout, shows the
+changed files and their diffs, and sends your comments on them to an agent's
+pane.
 
 ## Audio Test
 

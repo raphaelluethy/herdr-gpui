@@ -218,6 +218,26 @@ pub enum Error {
     GitPullRequestBase,
     #[error("Git worker stopped. Retry the operation.")]
     GitWorker,
+    #[error(
+        "No base branch to compare with: origin has no default branch, and there is no origin/main, origin/master, main, or master."
+    )]
+    ReviewNoBase,
+    #[error("The branch has no commits yet, so there is nothing to compare it with.")]
+    ReviewUnborn,
+    #[error("Git named a path outside the checkout; it was not touched.")]
+    ReviewUnsafePath,
+    #[error("Could not {operation} the file.")]
+    ReviewFile {
+        operation: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Send or remove review comments before adding more; a checkout holds 50 at most.")]
+    ReviewNotesFull,
+    #[error("Write the comment first.")]
+    ReviewEmptyComment,
+    #[error("Review worker stopped. Refresh to retry.")]
+    ReviewWorker,
     #[error("Could not {operation}.")]
     GitProcess {
         operation: &'static str,
