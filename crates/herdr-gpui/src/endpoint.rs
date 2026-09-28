@@ -516,6 +516,7 @@ impl HerdrWindow {
         self.marked.clear();
         self.last_queued_options = None;
         self.sent_focus = None;
+        self.sent_host_theme = None;
         self.wheel = WheelAccumulator::default();
         self.activation_deadline = (self.selected_endpoint != 0 && !endpoint.detached)
             .then(|| Instant::now() + ACTIVATION_TIMEOUT);
@@ -852,6 +853,7 @@ impl HerdrWindow {
                     self.activation_deadline = Some(Instant::now() + ACTIVATION_TIMEOUT);
                     self.last_queued_options = Some(self.options);
                     self.sent_focus = None;
+                    self.sent_host_theme = None;
                 }
                 Err(error) => {
                     self.local_error = Some(format!("Activate: {error}"));

@@ -65,6 +65,13 @@ pub(crate) struct SetLayout {
     pub(crate) mode: crate::config::LayoutMode,
 }
 
+/// Forces light or dark mode, or follows the system, from View > Appearance.
+#[derive(Clone, PartialEq, serde::Deserialize, Action)]
+#[action(no_json)]
+pub(crate) struct SetAppearance {
+    pub(crate) appearance: crate::config::Appearance,
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, Action)]
 #[action(no_json)]
 pub(crate) struct ShowToastPreview {

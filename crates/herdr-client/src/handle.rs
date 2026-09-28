@@ -6,6 +6,7 @@ use crate::{
     Error, Result, SendError,
     clipboard::{ClipboardImageUpload, ImageLease, ImageSlot},
     event::ClientEvent,
+    limits::MAX_HOST_PALETTE_COLORS,
     method::Method,
     options::{ConnectOptions, validate_options},
     protocol::*,
@@ -198,6 +199,20 @@ impl ClientHandle {
     }
     pub fn set_focus(&self, boot_id: &str, focused: bool) -> Result<()> {
         self.enqueue(boot_id, ClientMessage::ClientShellFocus { focused }, None)
+    }
+    /// Report the colors and light/dark appearance this client paints with,
+    /// which the daemon answers color queries from while it is foreground.
+    pub fn set_host_theme(&self, boot_id: &str, update: ClientHostThemeUpdate) -> Result<()> {
+        if let ClientHostThemeUpdate::PaletteColors(colors) = &update
+            && colors.len() > MAX_HOST_PALETTE_COLORS
+        {
+            return Err(Error::HostPaletteTooLarge(colors.len()));
+        }
+        self.enqueue(
+            boot_id,
+            ClientMessage::ClientShellHostTheme { update },
+            None,
+        )
     }
     /// Queue upstream's surface-interest API, not window focus. Wait for the
     /// matching Response before considering a host activation/deactivation complete.

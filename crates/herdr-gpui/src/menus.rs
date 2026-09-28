@@ -3,8 +3,8 @@
 
 use crate::{
     CheckForUpdates, Quit, RunCommand, ShowLogs,
-    actions::{Copy, Cut, Paste, SelectAll, SetLayout},
-    config::{Layout, LayoutMode},
+    actions::{Copy, Cut, Paste, SelectAll, SetAppearance, SetLayout},
+    config::{Appearance, Layout, LayoutMode},
     controls::Command,
 };
 #[cfg(target_os = "macos")]
@@ -18,12 +18,31 @@ use gpui::{App, Menu, MenuItem, OsAction};
 #[cfg(feature = "qa-menu")]
 use herdr_client::protocol::SemanticNotificationKind;
 
-/// Installs the menu bar, checking the layout the latest config picked.
+/// Installs the menu bar, checking the layout and appearance the latest
+/// config picked.
 pub(crate) fn install(cx: &mut App) {
-    let layout = cx
+    let (layout, appearance) = cx
         .try_global::<crate::app::InitialAppearance>()
-        .map_or_else(Layout::default, |appearance| appearance.config.layout);
-    cx.set_menus(menus(layout));
+        .map_or_else(Default::default, |initial| {
+            (initial.config.layout, initial.config.appearance)
+        });
+    cx.set_menus(menus(layout, appearance));
+}
+
+/// View > Appearance: follow the system, or force light or dark mode.
+fn appearance_menu(current: Appearance) -> MenuItem {
+    let items = Appearance::ALL
+        .iter()
+        .enumerate()
+        .flat_map(|(index, &appearance)| {
+            let group = (index == 1).then(MenuItem::separator);
+            group.into_iter().chain([MenuItem::action(
+                appearance.label(),
+                SetAppearance { appearance },
+            )
+            .checked(appearance == current)])
+        });
+    MenuItem::submenu(Menu::new("Appearance").items(items))
 }
 
 /// View > Layout: Herdr's densities, their rounded versions, then the
@@ -41,8 +60,9 @@ fn layout_menu(current: LayoutMode) -> MenuItem {
     MenuItem::submenu(Menu::new("Layout").items(items))
 }
 
-/// The menu bar, with `layout`'s mode checked under View > Layout.
-pub(crate) fn menus(layout: Layout) -> Vec<Menu> {
+/// The menu bar, with `layout`'s mode checked under View > Layout and
+/// `appearance` under View > Appearance.
+pub(crate) fn menus(layout: Layout, appearance: Appearance) -> Vec<Menu> {
     vec![
         Menu {
             name: "Herdr".into(),
@@ -169,6 +189,7 @@ pub(crate) fn menus(layout: Layout) -> Vec<Menu> {
                 ),
                 MenuItem::separator(),
                 layout_menu(layout.mode),
+                appearance_menu(appearance),
             ],
         },
         Menu {
@@ -314,7 +335,7 @@ mod tests {
     #[test]
     #[cfg(feature = "qa-menu")]
     fn badge_preview_is_available_only_in_the_macos_qa_menu() {
-        let menus = menus(Layout::default());
+        let menus = menus(Layout::default(), Appearance::default());
         let qa = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "QA")
@@ -339,7 +360,7 @@ mod tests {
     #[test]
     #[cfg(feature = "qa-menu")]
     fn qa_menu_carries_update_progress_previews() {
-        let menus = menus(Layout::default());
+        let menus = menus(Layout::default(), Appearance::default());
         let qa = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "QA")
@@ -367,10 +388,13 @@ mod tests {
     #[test]
     fn view_menu_lists_every_layout_in_groups_and_checks_the_current_one() {
         for current in LayoutMode::ALL {
-            let menus = menus(Layout {
-                mode: current,
-                ..Layout::default()
-            });
+            let menus = menus(
+                Layout {
+                    mode: current,
+                    ..Layout::default()
+                },
+                Appearance::default(),
+            );
             let view = menus
                 .iter()
                 .find(|menu| menu.name.as_ref() == "View")
@@ -421,8 +445,48 @@ mod tests {
     }
 
     #[test]
+    fn view_menu_checks_the_appearance_in_use() {
+        for current in Appearance::ALL {
+            let menus = menus(Layout::default(), current);
+            let view = menus
+                .iter()
+                .find(|menu| menu.name.as_ref() == "View")
+                .unwrap();
+            let appearance = view
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    MenuItem::Submenu(menu) if menu.name.as_ref() == "Appearance" => Some(menu),
+                    _ => None,
+                })
+                .unwrap();
+            // Following the system, then the two forced modes.
+            assert!(matches!(appearance.items[1], MenuItem::Separator));
+            let actions: Vec<_> = appearance
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    MenuItem::Action {
+                        name,
+                        action,
+                        checked,
+                        ..
+                    } => Some((name, action, *checked)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(actions.len(), Appearance::ALL.len());
+            for ((name, action, checked), choice) in actions.into_iter().zip(Appearance::ALL) {
+                assert_eq!(name.as_ref(), choice.label());
+                assert!(action.partial_eq(&SetAppearance { appearance: choice }));
+                assert_eq!(checked, choice == current, "{current}");
+            }
+        }
+    }
+
+    #[test]
     fn qa_menu_requires_explicit_feature() {
-        let menus = menus(Layout::default());
+        let menus = menus(Layout::default(), Appearance::default());
         let names: Vec<_> = menus.iter().map(|menu| menu.name.as_ref()).collect();
         let mut expected = vec!["Herdr", "File", "Edit", "View", "Terminal", "Window"];
         if cfg!(feature = "qa-menu") {
@@ -432,7 +496,7 @@ mod tests {
     }
 
     fn edit_action(label: &str) -> Box<dyn gpui::Action> {
-        menus(Layout::default())
+        menus(Layout::default(), Appearance::default())
             .into_iter()
             .find(|menu| menu.name.as_ref() == "Edit")
             .unwrap()
@@ -449,7 +513,7 @@ mod tests {
     /// every macOS app shows, and labels that do not claim the keystrokes.
     #[gpui::test]
     fn edit_menu_carries_standard_items_and_shortcut_labels(cx: &mut gpui::TestAppContext) {
-        let items = &menus(Layout::default())
+        let items = &menus(Layout::default(), Appearance::default())
             .into_iter()
             .find(|menu| menu.name.as_ref() == "Edit")
             .unwrap()
@@ -584,7 +648,7 @@ mod tests {
     /// an action of its own.
     #[test]
     fn view_menu_carries_the_font_size_commands() {
-        let menus = menus(Layout::default());
+        let menus = menus(Layout::default(), Appearance::default());
         let view = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "View")
@@ -626,7 +690,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[gpui::test]
     fn macos_menus_carry_hide_and_minimize(cx: &mut gpui::TestAppContext) {
-        let menus = menus(Layout::default());
+        let menus = menus(Layout::default(), Appearance::default());
         let herdr = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "Herdr")
@@ -682,7 +746,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn hide_and_minimize_are_macos_only() {
-        let menus = menus(Layout::default());
+        let menus = menus(Layout::default(), Appearance::default());
         let herdr = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "Herdr")

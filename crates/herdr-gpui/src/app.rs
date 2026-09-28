@@ -213,6 +213,11 @@ pub(crate) fn run() -> std::process::ExitCode {
             if mode == LaunchMode::Normal {
                 crate::control::install(cx);
             }
+            // Force the native frame before the first window opens, so it
+            // never flashes the system's mode.
+            if appearance.config.appearance != crate::config::Appearance::System {
+                crate::window::apply_native_appearance(appearance.config.appearance, cx);
+            }
             cx.set_global(appearance);
             app_icon::install();
             #[cfg(target_os = "macos")]

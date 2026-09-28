@@ -67,6 +67,8 @@ pub enum Error {
     UnsupportedMethod,
     #[error("surface interest capabilities not advertised by endpoint")]
     UnsupportedSurfaceInterest,
+    #[error("host palette update has {0} colors; at most 256 are allowed")]
+    HostPaletteTooLarge(usize),
     #[error("surface dimensions must be nonzero")]
     EmptySurface,
     #[error("surface geometry exceeds endpoint limits")]
