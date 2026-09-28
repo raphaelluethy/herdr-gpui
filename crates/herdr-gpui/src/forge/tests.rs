@@ -652,7 +652,7 @@ fn gitlab_projects_must_be_the_one_asked_for_on_the_same_host() {
 
 #[test]
 fn glab_auth_status_lines_name_the_signed_in_hosts() {
-    let text = "gitlab.com\n  ✓ Logged in to gitlab.com as octo (/home/u/.config/glab-cli/config.yml)\n  ✓ Token: **************************\ngitlab.example.com\n  x gitlab.example.com: API call failed: 401\ncode.example.org:8443\n  ✓ Logged in to Code.Example.org:8443 as octo (GITLAB_TOKEN)\n  ✓ Logged in to gitlab.com as octo (again)\n  ✓ Logged in to evil host as x\n  ✓ Logged in to github.com as x\n";
+    let text = "gitlab.com\n  ✓ Logged in to gitlab.com as octo (/home/u/.config/glab-cli/config.yml)\n  ✓ Token: **************************\ngitlab.example.com\n  x gitlab.example.com: API call failed: 401\ncode.example.org:8443\n  ✓ Logged in to Code.Example.org:8443 as octo (GITLAB_TOKEN)\n  ✓ Logged in to gitlab.com as octo (again)\n  ✓ Logged in to evil host as x\n  ✓ Logged in to github.com as x\n  ✓ Logged in to --help as x\n";
     assert_eq!(
         probe::signed_in_hosts(text),
         ["gitlab.com", "code.example.org:8443"]

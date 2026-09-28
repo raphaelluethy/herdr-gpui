@@ -375,6 +375,8 @@ pub(super) fn signed_in_hosts(text: &str) -> Vec<String> {
         let valid = !host.is_empty()
             && host.len() <= 253
             && host != "github.com"
+            // A host is passed as `--hostname HOST`; it must never read as a flag.
+            && !host.starts_with(['-', '.', ':'])
             && host
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'));
