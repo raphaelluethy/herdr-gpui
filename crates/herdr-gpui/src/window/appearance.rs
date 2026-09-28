@@ -139,6 +139,7 @@ fn host_theme_updates(theme: &Theme, dark: bool) -> [ClientHostThemeUpdate; 4] {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]
