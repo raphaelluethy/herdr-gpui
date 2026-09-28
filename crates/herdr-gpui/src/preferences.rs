@@ -143,6 +143,73 @@ impl HerdrWindow {
             )
     }
 
+    /// One mode's theme, which opens the picker for that mode. Choosing a
+    /// different theme for one mode than the other pairs them, so the app
+    /// switches with the appearance. The mode on screen is marked.
+    fn render_mode_theme(&self, dark: bool, cx: &mut Context<Self>) -> Div {
+        let theme = &self.theme;
+        let (id, choose, label): (&'static str, &'static str, _) = if dark {
+            (
+                "preferences-theme-dark",
+                "preferences-theme-dark-choose",
+                "Dark theme",
+            )
+        } else {
+            (
+                "preferences-theme-light",
+                "preferences-theme-light-choose",
+                "Light theme",
+            )
+        };
+        let in_use = dark == self.dark;
+        div()
+            .debug_selector(move || id.into())
+            .flex()
+            .items_center()
+            .min_w_0()
+            .gap(px(12.))
+            .py(px(7.))
+            .border_b_1()
+            .border_color(rgb(theme.active))
+            .child(
+                div()
+                    .w(relative(0.3))
+                    .flex_none()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(if in_use {
+                        crate::menu::accent(theme)
+                    } else {
+                        rgb(theme.muted)
+                    })
+                    .child(if in_use {
+                        format!("{label} \u{2022}")
+                    } else {
+                        label.to_owned()
+                    }),
+            )
+            .child(
+                div()
+                    .id(choose)
+                    .debug_selector(move || choose.into())
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_right()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme.active)))
+                    .child(format!("{} \u{25BE}", self.theme_name_for(dark)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_theme_picker_for(
+                            crate::theme_picker::ThemeTarget::Mode { dark },
+                            window,
+                            cx,
+                        );
+                    })),
+            )
+    }
+
     pub(super) fn render_preferences(&self, cx: &mut Context<Self>) -> Div {
         let theme = &self.theme;
         let font = &self.config.ui;
@@ -244,15 +311,8 @@ impl HerdrWindow {
                 format!("{} px", self.config.layout.sidebar_gap),
             ))
             .child(self.render_appearance_choice(cx))
-            .child(row("preferences-theme", "Theme", self.config.theme.clone()))
-            .child(div().py(px(10.)).child(
-                button("preferences-choose-theme", "Choose theme").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_theme_picker(window, cx);
-                    },
-                )),
-            ))
+            .child(self.render_mode_theme(false, cx))
+            .child(self.render_mode_theme(true, cx))
             .child(section("FONTS"));
         body = body.child(
             div()

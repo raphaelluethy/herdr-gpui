@@ -320,17 +320,18 @@ reads from the OS directly, such as macOS `defaults`. On macOS the forced mode
 also drives the native window frame; GPUI has no such override on Linux or
 Windows, where the app draws its own frame from the theme.
 
-To have the app's own colors switch too, pair a theme for each mode, in
-Ghostty's syntax:
+To have the app's own colors switch too, choose a theme for each mode under
+**Light theme** and **Dark theme** in Preferences; the mode on screen is marked.
+Choosing a different theme for one mode pairs them, saved in Ghostty's syntax:
 
 ```toml
 theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"
 ```
 
 Every window shows the current mode's theme and swaps when the mode changes,
-whether forced or following the system. The theme picker lists and replaces the
-current mode's half and keeps the other. A single theme stays as it is in both
-modes, so pick a light or dark one to match.
+whether forced or following the system. The Themes command picks the
+theme on screen: the current mode's half of a pair, or a single theme for both
+modes. Choosing the same theme for both collapses the pair to one name.
 
 Choose the sidebar layout from **View > Layout**, which lists every layout,
 checks the one in use, switches at once, and saves the choice to
@@ -1005,7 +1006,7 @@ Windows setup) nothing is saved and the window says so.
 - In-app sidebar menu for settings information, keybinds, config reload, update
   information, and detach/reconnect. Styled Preferences include Appearance,
   Fonts, Configuration, and Connection sections, with a System/Light/Dark
-  appearance switch, theme selection, and GUI
+  appearance switch, a theme for each mode, and GUI
   config reload; a searchable installed-font picker can set all four families
   together or each independently (including Platform default), while sizes have
   −/+ controls and editable whole-number fields (8–48; Enter or leave to save,

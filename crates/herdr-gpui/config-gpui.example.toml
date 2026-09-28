@@ -15,7 +15,8 @@
 
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path. Pair two
-# as in Ghostty to switch with the appearance below:
+# as in Ghostty to switch with the appearance below, or choose each under
+# Light theme and Dark theme in Preferences:
 # theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"
 theme = "Default"
 # Light or dark mode for the app and for the programs in its terminals:

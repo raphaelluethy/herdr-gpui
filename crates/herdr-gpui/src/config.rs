@@ -1402,14 +1402,24 @@ impl Config {
         ThemeNames::parse(&self.theme)
     }
 
-    /// The `theme` value after choosing `name` while in the given mode. A
-    /// pair keeps the other mode's theme; a single theme is replaced whole.
-    pub fn theme_choosing(&self, dark: bool, name: &str) -> Result<String> {
+    /// The `theme` value after choosing `name` for the given mode. A pair
+    /// keeps the other mode's theme. A single theme is replaced whole unless
+    /// `split`, which pairs `name` with it for the other mode. Two halves
+    /// naming the same theme collapse to that one name.
+    pub fn theme_choosing(&self, dark: bool, name: &str, split: bool) -> Result<String> {
         let names = self.theme_names()?;
-        Ok(match (names.paired, dark) {
-            (false, _) => name.to_owned(),
-            (true, true) => format!("light:{},dark:{name}", names.light),
-            (true, false) => format!("light:{name},dark:{}", names.dark),
+        if !names.paired && !split {
+            return Ok(name.to_owned());
+        }
+        let (light, dark) = if dark {
+            (names.light, name)
+        } else {
+            (name, names.dark)
+        };
+        Ok(if light == dark {
+            name.to_owned()
+        } else {
+            format!("light:{light},dark:{dark}")
         })
     }
 
@@ -2505,22 +2515,39 @@ mod tests {
     #[test]
     fn choosing_a_theme_replaces_only_the_current_modes_half() -> anyhow::Result<()> {
         let pair = Config::parse("theme = 'light:Catppuccin Latte,dark:Nord'")?;
-        assert_eq!(
-            pair.theme_choosing(true, "Dracula")?,
-            "light:Catppuccin Latte,dark:Dracula"
-        );
-        assert_eq!(
-            pair.theme_choosing(false, "Default")?,
-            "light:Default,dark:Nord"
-        );
+        for split in [false, true] {
+            assert_eq!(
+                pair.theme_choosing(true, "Dracula", split)?,
+                "light:Catppuccin Latte,dark:Dracula"
+            );
+            assert_eq!(
+                pair.theme_choosing(false, "Default", split)?,
+                "light:Default,dark:Nord"
+            );
+            // Choosing the other half's theme leaves one name.
+            assert_eq!(
+                pair.theme_choosing(true, "Catppuccin Latte", split)?,
+                "Catppuccin Latte"
+            );
+        }
         let single = Config::parse("theme = 'Nord'")?;
         for dark in [false, true] {
-            assert_eq!(single.theme_choosing(dark, "Dracula")?, "Dracula");
+            assert_eq!(single.theme_choosing(dark, "Dracula", false)?, "Dracula");
+            assert_eq!(single.theme_choosing(dark, "Nord", true)?, "Nord");
         }
+        // Choosing one mode's theme pairs it with the single theme.
+        assert_eq!(
+            single.theme_choosing(false, "Catppuccin Latte", true)?,
+            "light:Catppuccin Latte,dark:Nord"
+        );
+        assert_eq!(
+            single.theme_choosing(true, "Dracula", true)?,
+            "light:Nord,dark:Dracula"
+        );
         // The saved pair round-trips and is validated whole.
         let temp = TempDirectory::new()?;
         let path = temp.0.join("config.toml");
-        let value = pair.theme_choosing(true, "Dracula")?;
+        let value = pair.theme_choosing(true, "Dracula", false)?;
         pair.save_theme_path(&value, &path)?;
         let saved = Config::parse(&fs::read_to_string(&path)?)?.themes()?;
         assert_eq!(Some(saved.dark), Theme::builtin("Dracula"));
