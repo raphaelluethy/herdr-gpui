@@ -385,3 +385,17 @@ fn cells_hand_their_state_and_data_to_the_layout() {
         ]
     );
 }
+
+#[test]
+fn merge_request_badges_use_gitlab_references_and_show_no_line_counts() {
+    let theme = Theme::default();
+    let mut pr = crate::pull_request::fixture().unwrap();
+    let badge = super::row::PrBadge::new(&pr, &theme);
+    assert_eq!(badge.number, "#8");
+    assert_eq!(badge.counts, Some(("+1730".into(), "-31".into())));
+    // GitLab reports no line counts, so the badge shows none at all.
+    pr.forge = crate::forge::Kind::GitLab;
+    let badge = super::row::PrBadge::new(&pr, &theme);
+    assert_eq!(badge.number, "!8");
+    assert!(badge.counts.is_none());
+}

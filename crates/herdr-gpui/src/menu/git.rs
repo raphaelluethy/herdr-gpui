@@ -151,7 +151,7 @@ impl HerdrWindow {
             .flatten()
     }
 
-    /// A GitHub lookup for the focused branch is in flight or about to be.
+    /// A forge lookup for the focused branch is in flight or about to be.
     fn git_pull_request_loading(&self) -> bool {
         self.has_forge_access()
             && self
@@ -177,7 +177,7 @@ impl HerdrWindow {
             match self.git_open_pull_request() {
                 Some(pr) => (
                     Row::PullRequest,
-                    format!("Open pull request #{}", pr.number),
+                    format!("Open {} {}", pr.noun(), pr.reference()),
                 ),
                 None => (Row::PullRequest, "Create pull request".into()),
             },
@@ -366,11 +366,7 @@ impl HerdrWindow {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(
-                        div()
-                            .text_color(rgb(pr.color(theme)))
-                            .child(format!("#{}", pr.number)),
-                    )
+                    .child(div().text_color(rgb(pr.color(theme))).child(pr.reference()))
                     .child(
                         div()
                             .px(px(6.))
@@ -381,22 +377,24 @@ impl HerdrWindow {
                             .child(pr.lifecycle()),
                     )
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .debug_selector(|| "git-menu-pr-counts".into())
-                            .flex()
-                            .child(
-                                div()
-                                    .text_color(rgb(theme.palette[2]))
-                                    .child(format!("+{}", crate::sidebar::compact(pr.additions))),
-                            )
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .text_color(rgb(theme.palette[1]))
-                                    .child(format!("-{}", crate::sidebar::compact(pr.deletions))),
-                            ),
-                    ),
+                    .when_some(pr.line_counts(), |row, (additions, deletions)| {
+                        row.child(
+                            div()
+                                .debug_selector(|| "git-menu-pr-counts".into())
+                                .flex()
+                                .child(
+                                    div()
+                                        .text_color(rgb(theme.palette[2]))
+                                        .child(format!("+{}", crate::sidebar::compact(additions))),
+                                )
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .text_color(rgb(theme.palette[1]))
+                                        .child(format!("-{}", crate::sidebar::compact(deletions))),
+                                ),
+                        )
+                    }),
             );
             panel = panel.child(self.render_git_summary());
             if pr.state == PrState::Open {

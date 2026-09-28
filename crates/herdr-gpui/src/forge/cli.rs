@@ -29,6 +29,8 @@ impl Kind {
         match (self, cfg!(windows)) {
             (Self::GitHub, false) => "gh",
             (Self::GitHub, true) => "gh.exe",
+            (Self::GitLab, false) => "glab",
+            (Self::GitLab, true) => "glab.exe",
         }
     }
 }

@@ -2,6 +2,7 @@
 
 mod cache;
 mod fetch;
+mod gitlab;
 mod lookup;
 mod model;
 mod parse;

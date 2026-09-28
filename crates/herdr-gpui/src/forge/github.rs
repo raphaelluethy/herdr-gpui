@@ -52,6 +52,8 @@ pub(crate) fn graphql(
         Access::Gh(program) => gh(
             context, program, query, variables, timeout, &cancelled, cooldown,
         ),
+        // Callers pick the grant for a GitHub remote; glab cannot answer it.
+        Access::Glab(_) => Err(Error::ForgeAccess(Kind::GitHub)),
     }
 }
 

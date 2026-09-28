@@ -6,7 +6,7 @@ use super::{
     Page, WorkspaceAction,
     worktree_source::{Row, Tab},
 };
-use crate::{HerdrWindow, repo_items::Kind};
+use crate::HerdrWindow;
 use gpui::{prelude::*, *};
 
 impl HerdrWindow {
@@ -16,10 +16,11 @@ impl HerdrWindow {
     /// neither listing can be fetched without one, and look it.
     pub(super) fn render_worktree_tabs(&self, cx: &mut Context<Self>) -> Div {
         let theme = &self.theme;
-        let connected = self.menu.github.connected();
+        let connected = self.has_forge_access();
         let Some(source) = &self.menu.worktree else {
             return div();
         };
+        let forge = source.forge();
         let busy = source.busy();
         let mut strip = div()
             .debug_selector(|| "worktree-tabs".into())
@@ -28,7 +29,7 @@ impl HerdrWindow {
             .px(px(16.))
             .pt(px(10.));
         for tab in Tab::ALL {
-            let label = tab.label();
+            let label = tab.label(forge);
             let enabled = connected || tab.kind().is_none();
             let selected = tab == source.tab;
             // A tab that cannot be opened drops its outline and fades, so it
@@ -127,13 +128,10 @@ impl HerdrWindow {
                 },
             ),
             Tab::Items(kind) => (
-                match kind {
-                    Kind::PullRequest => "open pull requests",
-                    Kind::Issue => "open issues",
-                },
+                kind.listing(source.forge()),
                 source.lookup.loading,
                 source.lookup.message.as_ref(),
-                kind.empty_label(),
+                kind.empty_label(source.forge()),
             ),
         };
         let message = self.menu.error.as_ref().or(message);
@@ -251,12 +249,12 @@ impl HerdrWindow {
             ),
             Row::Branch(branch) => (None, branch.name.clone(), None, None),
             Row::Item(item) => (
-                Some(format!("#{}", item.number)),
+                Some(item.reference()),
                 item.title.clone(),
                 item.draft.then_some("draft"),
                 // A fork's head branch has no ref on `origin`, so the row says
                 // why it cannot be picked rather than failing once it is.
-                Some(if item.fork_owner.is_some() {
+                Some(if item.fork {
                     "from a fork - check out manually".to_owned()
                 } else {
                     let branch = item.branch();

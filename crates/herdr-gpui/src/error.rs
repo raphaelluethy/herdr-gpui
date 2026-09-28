@@ -144,12 +144,16 @@ pub enum Error {
     PrRepositoryMismatch,
     #[error("Checkout branch changed. Waiting for daemon metadata.")]
     PrBranchChanged,
-    #[error("PR lookup supports GitHub.com origins only.")]
+    #[error("PR lookup supports GitHub.com and signed-in GitLab origins only.")]
     PrOrigin,
     #[error("{} access unavailable for this repository. {}", .0.name(), .0.login_hint())]
     ForgeAccess(crate::forge::Kind),
-    #[error("No GitHub access. Sign in from the GitHub panel or run `gh auth login`.")]
+    #[error(
+        "No GitHub or GitLab access. Sign in from the GitHub panel, or run `gh auth login` or `glab auth login`."
+    )]
     ForgeUnavailable,
+    #[error("GitLab project unavailable. Check that glab can read this repository.")]
+    GitLabProject,
     #[error("{} is not installed.", .0.cli())]
     CliMissing(crate::forge::Kind),
     #[error("{} is not signed in. {}", .0.cli(), .0.login_hint())]

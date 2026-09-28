@@ -140,18 +140,31 @@ pub(super) fn fetch_with_backoff(
     let branch = head
         .as_ref()
         .map_or(input.branch.as_str(), |head| head.branch.as_str());
-    let timeout = deadline
-        .checked_duration_since(Instant::now())
-        .ok_or(Error::PrTimeout)?;
-    github(
-        &remote,
-        access,
-        branch,
-        head.as_ref(),
-        timeout,
-        cancelled,
-        cooldown,
-    )
+    match access {
+        Access::Native(_) | Access::Gh(_) => {
+            let timeout = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(Error::PrTimeout)?;
+            github(
+                &remote,
+                access,
+                branch,
+                head.as_ref(),
+                timeout,
+                cancelled,
+                cooldown,
+            )
+        }
+        Access::Glab(program) => super::gitlab::lookup(
+            program,
+            &remote,
+            branch,
+            head.as_ref(),
+            deadline,
+            &cancelled,
+            cooldown,
+        ),
+    }
 }
 
 fn github(

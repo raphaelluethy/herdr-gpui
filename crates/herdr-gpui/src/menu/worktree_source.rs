@@ -36,12 +36,14 @@ impl Tab {
         Self::Items(Kind::Issue),
     ];
 
-    pub(super) fn label(self) -> &'static str {
+    /// The tab's name; the listing tab follows the forge's own wording once
+    /// the repository's forge is known.
+    pub(super) fn label(self, forge: crate::forge::Kind) -> &'static str {
         match self {
             Self::New => "new",
             Self::Existing => "existing",
             Self::Branches => "branch",
-            Self::Items(kind) => kind.tab_label(),
+            Self::Items(kind) => kind.tab_label(forge),
         }
     }
 
@@ -139,6 +141,14 @@ pub(crate) struct WorktreeSource {
 }
 
 impl WorktreeSource {
+    /// The listed repository's forge, GitHub until a listing says otherwise.
+    pub(super) fn forge(&self) -> crate::forge::Kind {
+        self.lookup
+            .origin
+            .as_ref()
+            .map_or(crate::forge::Kind::GitHub, |origin| origin.kind)
+    }
+
     /// Search every listing for `query` and rebuild the open tab's rows.
     /// Checkouts match on path, label and branch; GitHub rows on number, title
     /// and author, as the theme picker matches names.

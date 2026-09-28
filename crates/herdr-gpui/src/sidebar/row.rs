@@ -167,17 +167,21 @@ impl RowBadge {
 pub(super) struct PrBadge {
     pub(super) number: String,
     pub(super) color: u32,
-    pub(super) additions: String,
-    pub(super) deletions: String,
+    /// `+additions` and `-deletions`, when the forge reports line counts.
+    pub(super) counts: Option<(String, String)>,
 }
 
 impl PrBadge {
     pub(super) fn new(pr: &crate::pull_request::PullRequest, theme: &Theme) -> Self {
         Self {
-            number: format!("#{}", pr.number),
+            number: pr.reference(),
             color: pr.color(theme),
-            additions: format!("+{}", compact(pr.additions)),
-            deletions: format!("-{}", compact(pr.deletions)),
+            counts: pr.line_counts().map(|(additions, deletions)| {
+                (
+                    format!("+{}", compact(additions)),
+                    format!("-{}", compact(deletions)),
+                )
+            }),
         }
     }
 
@@ -186,9 +190,10 @@ impl PrBadge {
     /// a wider face truncates the counts rather than eating the label.
     pub(super) fn width(&self, font: &FontConfig, layout: &dyn SidebarDensity) -> f32 {
         let mut glyphs = self.number.chars().count();
-        if layout.pr_counts() {
-            glyphs =
-                glyphs.max(self.additions.chars().count() + self.deletions.chars().count() + 1);
+        if layout.pr_counts()
+            && let Some((additions, deletions)) = &self.counts
+        {
+            glyphs = glyphs.max(additions.chars().count() + deletions.chars().count() + 1);
         }
         (glyph_width(font) * glyphs as f32).ceil()
     }
@@ -564,32 +569,36 @@ pub(super) fn row(
                                 )
                             }),
                     )
-                    .when_some(pr.filter(|_| layout.pr_counts()), |column, badge| {
-                        column.child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(rgb(theme.palette[2]))
-                                        .child(label_text(&badge.additions)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(rgb(theme.muted))
-                                        .child(label_text("/")),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(rgb(theme.palette[1]))
-                                        .child(label_text(&badge.deletions)),
-                                ),
-                        )
-                    }),
+                    .when_some(
+                        pr.filter(|_| layout.pr_counts())
+                            .and_then(|badge| badge.counts),
+                        |column, (additions, deletions)| {
+                            column.child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme.palette[2]))
+                                            .child(label_text(&additions)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme.muted))
+                                            .child(label_text("/")),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme.palette[1]))
+                                            .child(label_text(&deletions)),
+                                    ),
+                            )
+                        },
+                    ),
             )
         })
 }

@@ -52,10 +52,9 @@ impl HerdrWindow {
         let running = self.git.running().is_some();
         let pr = self.git_pull_request().map(|pr| {
             (
-                format!("#{}", pr.number),
+                pr.reference(),
                 pr.color(theme),
-                pr.additions,
-                pr.deletions,
+                pr.line_counts(),
                 pr.url.clone(),
             )
         });
@@ -72,7 +71,7 @@ impl HerdrWindow {
                 .text_size(px(font.size))
                 .text_color(rgb(theme.foreground))
                 .map(|button| match pr {
-                    Some((number, color, additions, deletions, url)) => button
+                    Some((number, color, counts, url)) => button
                         .child(
                             div()
                                 .id("titlebar-git-pr-link")
@@ -98,34 +97,36 @@ impl HerdrWindow {
                                         .text_color(rgb(color))
                                         .child(number),
                                 )
-                                .child(
-                                    div()
-                                        .debug_selector(|| "titlebar-git-pr-lines".into())
-                                        .flex()
-                                        .child(
-                                            div()
-                                                .debug_selector(|| {
-                                                    "titlebar-git-pr-additions".into()
-                                                })
-                                                .text_color(rgb(theme.palette[2]))
-                                                .child(format!(
-                                                    "+{}",
-                                                    crate::sidebar::compact(additions)
-                                                )),
-                                        )
-                                        .child(div().text_color(rgb(theme.muted)).child("/"))
-                                        .child(
-                                            div()
-                                                .debug_selector(|| {
-                                                    "titlebar-git-pr-deletions".into()
-                                                })
-                                                .text_color(rgb(theme.palette[1]))
-                                                .child(format!(
-                                                    "-{}",
-                                                    crate::sidebar::compact(deletions)
-                                                )),
-                                        ),
-                                ),
+                                .when_some(counts, |link, (additions, deletions)| {
+                                    link.child(
+                                        div()
+                                            .debug_selector(|| "titlebar-git-pr-lines".into())
+                                            .flex()
+                                            .child(
+                                                div()
+                                                    .debug_selector(|| {
+                                                        "titlebar-git-pr-additions".into()
+                                                    })
+                                                    .text_color(rgb(theme.palette[2]))
+                                                    .child(format!(
+                                                        "+{}",
+                                                        crate::sidebar::compact(additions)
+                                                    )),
+                                            )
+                                            .child(div().text_color(rgb(theme.muted)).child("/"))
+                                            .child(
+                                                div()
+                                                    .debug_selector(|| {
+                                                        "titlebar-git-pr-deletions".into()
+                                                    })
+                                                    .text_color(rgb(theme.palette[1]))
+                                                    .child(format!(
+                                                        "-{}",
+                                                        crate::sidebar::compact(deletions)
+                                                    )),
+                                            ),
+                                    )
+                                }),
                         )
                         // The pull request's churn is history; the badge
                         // says work is still sitting in the checkout.

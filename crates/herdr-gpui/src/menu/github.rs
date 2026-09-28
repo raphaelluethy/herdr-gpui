@@ -123,8 +123,10 @@ mod tests {
             view.update(cx, |view, cx| {
                 assert!(!view.has_forge_access());
                 view.menu.forge_cli = crate::forge::Probe::signed_in_fixture(
+                    crate::forge::Kind::GitHub,
                     std::path::Path::new("/fixture/gh"),
                     "octo",
+                    &["github.com"],
                 );
                 assert!(matches!(view.forges().github, Some(Access::Gh(_))));
                 assert_eq!(
@@ -150,6 +152,40 @@ mod tests {
                 view.config.github.cli = GitHubCli::Off;
                 view.menu.github = crate::github::Auth::default();
                 assert!(!view.has_forge_access());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_signed_in_glab_serves_its_hosts_unless_turned_off(cx: &mut TestAppContext) {
+        use crate::{config::GitLabCli, forge::Access};
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.menu.forge_cli = crate::forge::Probe::signed_in_fixture(
+                    crate::forge::Kind::GitLab,
+                    std::path::Path::new("/fixture/glab"),
+                    "octo",
+                    &["gitlab.com", "gitlab.example.com"],
+                );
+                // GitLab alone is enough for the PR sections to appear.
+                assert!(view.has_forge_access());
+                let forges = view.forges();
+                assert!(forges.github.is_none());
+                assert!(matches!(forges.gitlab, Some(Access::Glab(_))));
+                assert_eq!(
+                    &*forges.gitlab_hosts,
+                    ["gitlab.com".to_owned(), "gitlab.example.com".to_owned()]
+                );
+                assert_eq!(
+                    view.forge_cli_notes(),
+                    [
+                        "GitLab CLI as @octo on gitlab.com, gitlab.example.com: merge requests on these hosts use it."
+                    ]
+                );
+                view.config.gitlab.cli = GitLabCli::Off;
+                assert!(!view.has_forge_access());
+                assert!(view.forges().gitlab_hosts.is_empty());
             });
         });
     }
@@ -348,17 +384,30 @@ impl HerdrWindow {
     }
 
     /// Every forge grant pull requests on the selected device can use: the
-    /// native account `pr_profile` picks, or the user's signed-in `gh`, in the
-    /// order `[github] cli` sets. A CLI runs on this machine, so it serves
-    /// every device's lookups, which also run here.
+    /// native account `pr_profile` picks or the user's signed-in `gh`, in the
+    /// order `[github] cli` sets, and a signed-in `glab` for GitLab. A CLI
+    /// runs on this machine, so it serves every device's lookups, which also
+    /// run here.
     pub(crate) fn forges(&self) -> crate::forge::Forges {
+        let glab = self.gitlab_cli_in_use();
         crate::forge::Forges {
             github: crate::forge::github_access(
                 self.pr_profile().map(|profile| &profile.token),
                 self.menu.forge_cli.gh.program(),
                 self.config.github.cli,
             ),
+            gitlab: glab.map(|account| crate::forge::Access::Glab(account.program.clone())),
+            gitlab_hosts: glab
+                .map(|account| account.hosts.clone())
+                .unwrap_or_default(),
         }
+    }
+
+    /// The signed-in `glab`, unless the config turned it off.
+    pub(crate) fn gitlab_cli_in_use(&self) -> Option<&crate::forge::Account> {
+        (self.config.gitlab.cli != crate::config::GitLabCli::Off)
+            .then(|| self.menu.forge_cli.glab.account())
+            .flatten()
     }
 
     /// Whether any forge can be asked about pull requests. Which one serves a
@@ -395,6 +444,19 @@ impl HerdrWindow {
             Status::Failed(reason) => notes.push(format!("GitHub CLI unavailable: {reason}")),
             Status::Unknown | Status::NotInstalled => {}
         }
+        match &self.menu.forge_cli.glab {
+            Status::SignedIn(account) => notes.push(format!(
+                "GitLab CLI as @{} on {}: merge requests on these hosts use it.",
+                account.login,
+                account.hosts.join(", ")
+            )),
+            Status::SignedOut => notes.push(
+                "GitLab CLI found but not signed in. Run `glab auth login` to see merge requests."
+                    .into(),
+            ),
+            Status::Failed(reason) => notes.push(format!("GitLab CLI unavailable: {reason}")),
+            Status::Unknown | Status::NotInstalled => {}
+        }
         notes
     }
 
@@ -406,6 +468,7 @@ impl HerdrWindow {
         }
         let enabled = crate::forge::Enabled {
             gh: self.config.github.cli != crate::config::GitHubCli::Off,
+            glab: self.config.gitlab.cli != crate::config::GitLabCli::Off,
         };
         self.menu.forge_cli.poll(std::time::Instant::now(), enabled)
     }

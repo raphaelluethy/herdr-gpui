@@ -1,6 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
-use super::{Kind, issue_branch, model::parse, write_context};
+use super::{
+    Kind, issue_branch,
+    model::{parse, parse_gitlab},
+    write_context,
+};
 use crate::{Error, forge::Remote};
 use core::prelude::v1::test;
 use serde_json::json;
@@ -42,8 +46,8 @@ fn listings_keep_only_rows_a_checkout_can_be_created_from() {
     assert_eq!(prs[0].head.as_deref(), Some("worktree/rapid-forest"));
     // Owner comparison is case insensitive, so the repository's own branch is
     // not mistaken for a fork's.
-    assert!(prs[0].fork_owner.is_none());
-    assert_eq!(prs[1].fork_owner.as_deref(), Some("outsider"));
+    assert!(!prs[0].fork);
+    assert!(prs[1].fork);
     assert!(prs[1].draft);
     // URLs are rebuilt from the repository that was asked for.
     assert_eq!(prs[0].url, "https://github.com/penso/herdr-gpui/pull/48");
@@ -57,11 +61,7 @@ fn listings_keep_only_rows_a_checkout_can_be_created_from() {
         issues[0].url,
         "https://github.com/penso/herdr-gpui/issues/1255"
     );
-    assert!(
-        issues
-            .iter()
-            .all(|item| item.head.is_none() && item.fork_owner.is_none())
-    );
+    assert!(issues.iter().all(|item| item.head.is_none() && !item.fork));
     // A missing author is absence, not a literal "null" in the row.
     assert_eq!(issues[1].author, "");
 }
@@ -259,4 +259,169 @@ fn a_checkout_path_must_be_absolute() {
         write_context(std::path::Path::new("relative"), &items[0], &origin),
         Err(Error::PrAbsolutePath)
     ));
+}
+
+fn gitlab_project() -> crate::forge::gitlab::Project {
+    crate::forge::gitlab::Project {
+        id: 42,
+        web_url: "https://gitlab.example.com/group/sub/app".into(),
+        default_branch: Some("main".into()),
+    }
+}
+
+fn gitlab_items() -> (Vec<super::Item>, Vec<super::Item>) {
+    let merge_requests = json!([
+        {"iid": 7, "title": "Same project", "source_branch": "feature/x",
+         "source_project_id": 42, "target_project_id": 42, "draft": true,
+         "author": {"username": "octo"}, "web_url": "https://evil.test/ignored"},
+        {"iid": 51, "title": "From a fork", "source_branch": "main",
+         "source_project_id": 99, "target_project_id": 42,
+         "author": {"username": "outsider"}},
+        {"iid": 60, "title": "Rejected: another target", "source_branch": "x",
+         "source_project_id": 42, "target_project_id": 99},
+        {"iid": 61, "title": "Rejected: unusable head", "source_branch": "a branch",
+         "source_project_id": 42, "target_project_id": 42},
+        {"iid": 0, "title": "Rejected: no number", "source_branch": "zero",
+         "source_project_id": 42, "target_project_id": 42}
+    ]);
+    let issues = json!([
+        {"iid": 12, "title": "Crash on start", "author": {"username": "octo"}}
+    ]);
+    (
+        parse_gitlab(&merge_requests, &gitlab_project(), Kind::PullRequest).unwrap(),
+        parse_gitlab(&issues, &gitlab_project(), Kind::Issue).unwrap(),
+    )
+}
+
+#[test]
+fn gitlab_listings_use_merge_request_refs_and_wording() {
+    use crate::forge;
+    let (merge_requests, issues) = gitlab_items();
+    assert_eq!(
+        merge_requests
+            .iter()
+            .map(|item| item.number)
+            .collect::<Vec<_>>(),
+        [7, 51]
+    );
+    let same = &merge_requests[0];
+    assert_eq!(same.forge, forge::Kind::GitLab);
+    assert!(same.draft && !same.fork);
+    assert_eq!(same.author, "octo");
+    assert_eq!(
+        same.url,
+        "https://gitlab.example.com/group/sub/app/-/merge_requests/7"
+    );
+    assert_eq!(same.label(), "!7 Same project");
+    assert!(same.search_key().contains("!7"));
+    assert_eq!(same.branch(), "feature/x");
+    assert_eq!(same.base_ref(), "refs/remotes/origin/feature/x");
+    let fork = &merge_requests[1];
+    assert!(fork.fork);
+    assert_eq!(fork.branch(), "mr/51");
+    assert_eq!(fork.base_ref(), "refs/herdr/merge-requests/51/head");
+    assert_eq!(
+        fork.fetch_refspec(),
+        "+refs/merge-requests/51/head:refs/herdr/merge-requests/51/head"
+    );
+    assert_eq!(
+        issues[0].url,
+        "https://gitlab.example.com/group/sub/app/-/issues/12"
+    );
+    assert_eq!(issues[0].label(), "#12 Crash on start");
+    assert_eq!(issues[0].branch(), "12-crash-on-start");
+    assert_eq!(Kind::PullRequest.tab_label(forge::Kind::GitLab), "MR");
+    assert_eq!(Kind::PullRequest.tab_label(forge::Kind::GitHub), "PR");
+    assert_eq!(
+        Kind::PullRequest.empty_label(forge::Kind::GitLab),
+        "No open merge requests match."
+    );
+    assert!(matches!(
+        parse_gitlab(&json!({"message": "404"}), &gitlab_project(), Kind::Issue),
+        Err(Error::GitLabProject)
+    ));
+}
+
+#[test]
+fn gitlab_fork_fetch_uses_the_merge_request_ref() {
+    let temporary = tempfile::tempdir().unwrap();
+    let remote = temporary.path().join("remote");
+    let checkout = temporary.path().join("checkout");
+    let git = |path: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    std::fs::create_dir(&remote).unwrap();
+    git(&remote, &["init", "-b", "main"]);
+    git(&remote, &["commit", "--allow-empty", "-m", "base"]);
+    git(
+        temporary.path(),
+        &[
+            "clone",
+            remote.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    git(&remote, &["commit", "--allow-empty", "-m", "fork head"]);
+    let head = git(&remote, &["rev-parse", "HEAD"]);
+    git(
+        &remote,
+        &["update-ref", "refs/merge-requests/51/head", &head],
+    );
+    let input = crate::pull_request::Input {
+        checkout: Some(checkout.to_str().unwrap().into()),
+        repo_key: checkout.join(".git").to_str().unwrap().into(),
+        branch: "main".into(),
+    };
+    let (merge_requests, _) = gitlab_items();
+    super::fetch::fetch_branch(&input, &merge_requests[1], &|| false).unwrap();
+    assert_eq!(
+        git(&checkout, &["rev-parse", &merge_requests[1].base_ref()]),
+        head
+    );
+}
+
+#[test]
+fn the_agent_note_names_a_gitlab_merge_request() {
+    let temporary = tempfile::tempdir().unwrap();
+    let checkout = temporary.path().join("repo");
+    std::fs::create_dir_all(&checkout).unwrap();
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg(&checkout)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let origin = Remote::gitlab("gitlab.example.com", "group/sub/app");
+    let (merge_requests, _) = gitlab_items();
+    let directory = write_context(&checkout, &merge_requests[0], &origin).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(directory.join("context.json")).unwrap())
+            .unwrap();
+    assert_eq!(json["kind"], "merge_request");
+    assert_eq!(json["forge"], "gitlab");
+    assert_eq!(json["host"], "gitlab.example.com");
+    assert_eq!(json["repository"], "group/sub/app");
+    let markdown = std::fs::read_to_string(directory.join("CONTEXT.md")).unwrap();
+    assert!(
+        markdown.contains("for a GitLab merge request"),
+        "{markdown}"
+    );
+    assert!(markdown.contains("- Merge request: !7"), "{markdown}");
 }

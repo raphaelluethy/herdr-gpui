@@ -165,6 +165,12 @@ size = 12
 # and "off" never runs gh.
 # cli = "auto"
 
+# GitLab merge requests come from your own authenticated GitLab CLI
+# (`glab auth login`), for gitlab.com and the self-hosted instances it is
+# signed in to. Its credential stays with glab. "off" never runs glab.
+# [gitlab]
+# cli = "auto"
+
 # Optional behaviors, all off unless turned on here. Unknown keys are rejected.
 # [features]
 # Open a space's menu when the pointer rests on its sidebar row, without a

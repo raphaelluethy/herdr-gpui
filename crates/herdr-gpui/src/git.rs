@@ -8,7 +8,10 @@
 //! are explicit user actions and are never retried or replayed automatically.
 use crate::{
     Error,
-    forge::{Access, Forges, Remote, Variable},
+    forge::{
+        Access, Forges, Remote, Variable,
+        gitlab::{Client, Project},
+    },
     pull_request::{Input, clean, local_checkout, origin_remote, run},
 };
 use std::{
@@ -611,7 +614,71 @@ fn create_pull_request(
         deadline,
         cancelled,
     )?;
-    create_github_pull_request(&remote, access, branch, &title, cancelled)
+    match access {
+        Access::Native(_) | Access::Gh(_) => {
+            create_github_pull_request(&remote, access, branch, &title, cancelled)
+        }
+        Access::Glab(program) => {
+            create_gitlab_merge_request(program, &remote, branch, &title, cancelled)
+        }
+    }
+}
+
+/// Open a merge request into the project's default branch through `glab`,
+/// addressing the project by the ID its verified path resolves to.
+fn create_gitlab_merge_request(
+    program: &std::path::Path,
+    remote: &Remote,
+    branch: &str,
+    title: &str,
+    cancelled: &impl Fn() -> bool,
+) -> crate::Result<Outcome> {
+    let client = Client {
+        program,
+        host: &remote.host,
+    };
+    let mut cooldown = None;
+    let project = client.project(
+        remote,
+        Instant::now() + API_TIMEOUT,
+        cancelled,
+        &mut cooldown,
+    )?;
+    let base = project.default_branch.clone().ok_or(Error::GitLabProject)?;
+    if base == branch {
+        return Err(Error::GitPullRequestBase);
+    }
+    let created = client.post(
+        "create_mr",
+        &format!("projects/{}/merge_requests", project.id),
+        &[
+            ("source_branch", branch),
+            ("target_branch", &base),
+            ("title", title),
+        ],
+        Instant::now() + API_TIMEOUT,
+        cancelled,
+        &mut cooldown,
+    )?;
+    parse_created_merge_request(&created, &project, branch)
+}
+
+fn parse_created_merge_request(
+    response: &serde_json::Value,
+    project: &Project,
+    branch: &str,
+) -> crate::Result<Outcome> {
+    let iid = response["iid"].as_u64().filter(|iid| *iid > 0);
+    let Some(iid) = iid.filter(|_| {
+        response["source_branch"].as_str() == Some(branch)
+            && response["target_project_id"].as_u64() == Some(project.id)
+    }) else {
+        return Err(Error::PrIdentity);
+    };
+    Ok(Outcome {
+        message: format!("Opened merge request !{iid}"),
+        url: Some(format!("{}/-/merge_requests/{iid}", project.web_url)),
+    })
 }
 
 fn create_github_pull_request(
@@ -1092,5 +1159,73 @@ mod tests {
                 Err(Error::PrIdentity)
             ));
         }
+    }
+
+    #[test]
+    fn created_merge_requests_must_match_their_project_and_branch() {
+        let project = Project {
+            id: 42,
+            web_url: "https://gitlab.example.com/group/sub/app".into(),
+            default_branch: Some("main".into()),
+        };
+        let response = |iid: u64, branch: &str, target: u64| {
+            serde_json::json!({
+                "iid": iid, "source_branch": branch, "target_project_id": target,
+                "web_url": "https://evil.test/ignored"
+            })
+        };
+        let outcome =
+            parse_created_merge_request(&response(7, "feature", 42), &project, "feature").unwrap();
+        assert_eq!(outcome.message, "Opened merge request !7");
+        // The link is rebuilt from the verified project, not the reply.
+        assert_eq!(
+            outcome.url.as_deref(),
+            Some("https://gitlab.example.com/group/sub/app/-/merge_requests/7")
+        );
+        for (iid, branch, target) in [(0, "feature", 42), (7, "other", 42), (7, "feature", 9)] {
+            assert!(matches!(
+                parse_created_merge_request(&response(iid, branch, target), &project, "feature"),
+                Err(Error::PrIdentity)
+            ));
+        }
+    }
+
+    /// Creating a merge request pushes the branch, reads the default branch,
+    /// and posts to the project by ID through a fake `glab`; the default
+    /// branch itself is refused before anything is posted.
+    #[cfg(unix)]
+    #[test]
+    fn merge_requests_are_created_through_glab_into_the_default_branch() {
+        let fake = crate::forge::fake::Fake::new(
+            "glab",
+            "case \"$4\" in\n  projects/group%2Fapp) printf '%s' '{\"id\":42,\"path_with_namespace\":\"group/app\",\"web_url\":\"https://gitlab.example.com/group/app\",\"default_branch\":\"main\"}';;\n  *) printf '%s' '{\"iid\":9,\"source_branch\":\"feature\",\"target_project_id\":42}';;\nesac",
+        );
+        let remote = Remote {
+            kind: crate::forge::Kind::GitLab,
+            host: "gitlab.example.com".into(),
+            path: "group/app".into(),
+        };
+        let outcome =
+            create_gitlab_merge_request(&fake.program, &remote, "feature", "Add it", &|| false)
+                .unwrap();
+        assert_eq!(outcome.message, "Opened merge request !9");
+        let log = fake.log();
+        let post = log.iter().position(|argument| argument == "POST").unwrap();
+        assert_eq!(
+            &log[post + 1..],
+            [
+                "projects/42/merge_requests",
+                "-f",
+                "source_branch=feature",
+                "-f",
+                "target_branch=main",
+                "-f",
+                "title=Add it"
+            ]
+        );
+        assert!(matches!(
+            create_gitlab_merge_request(&fake.program, &remote, "main", "Add it", &|| false),
+            Err(Error::GitPullRequestBase)
+        ));
     }
 }

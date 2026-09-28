@@ -99,6 +99,7 @@ pub struct Config {
     pub terminal: FontConfig,
     pub ui: FontConfig,
     pub github: GitHubConfig,
+    pub gitlab: GitLabConfig,
     pub features: Features,
     pub notifications: NotificationConfig,
     pub clipboard_toast: ClipboardToast,
@@ -519,6 +520,24 @@ pub enum GitHubCli {
     Off,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitLabConfig {
+    /// Whether an authenticated `glab` serves GitLab origins.
+    pub cli: GitLabCli,
+}
+
+/// GitLab has no native sign-in here, so the CLI is either used or not.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitLabCli {
+    /// Use `glab` for GitLab origins on the hosts it is signed in to.
+    #[default]
+    Auto,
+    /// Never run `glab`.
+    Off,
+}
+
 impl GitHubConfig {
     pub fn client_id(&self) -> Result<Option<String>> {
         self.client_id_with_override(env::var_os("HERDR_GITHUB_OAUTH_CLIENT_ID").as_deref())
@@ -656,6 +675,7 @@ impl Default for Config {
             dark_theme: None,
             appearance: Appearance::default(),
             github: GitHubConfig::default(),
+            gitlab: GitLabConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
             agent_status_text: AgentStatusText::default(),
@@ -694,6 +714,7 @@ struct Settings {
     terminal: FontSettings,
     ui: FontSettings,
     github: GitHubConfig,
+    gitlab: GitLabConfig,
     features: Features,
     notifications: NotificationConfig,
     clipboard_toast: ClipboardToastSettings,
@@ -1117,6 +1138,7 @@ impl Config {
         let mut config = Self::default();
         settings.github.client_id_with_override(None)?;
         config.github = settings.github;
+        config.gitlab = settings.gitlab;
         config.features = settings.features;
         config.notifications = settings.notifications;
         config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
@@ -3268,8 +3290,21 @@ mod tests {
         for text in ["[github]\ncli = 'always'", "[github]\ncli = true"] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
-        // The shipped example documents the key without changing the default.
-        assert_eq!(Config::parse(DEFAULT_CONFIG)?.github.cli, GitHubCli::Auto);
+        assert_eq!(Config::parse("")?.gitlab.cli, GitLabCli::Auto);
+        assert_eq!(
+            Config::parse("[gitlab]\ncli = 'off'")?.gitlab.cli,
+            GitLabCli::Off
+        );
+        for text in [
+            "[gitlab]\ncli = 'prefer'",
+            "[gitlab]\ntoken = 'not-allowed'",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+        // The shipped example documents the keys without changing the defaults.
+        let example = Config::parse(DEFAULT_CONFIG)?;
+        assert_eq!(example.github.cli, GitHubCli::Auto);
+        assert_eq!(example.gitlab.cli, GitLabCli::Auto);
         Ok(())
     }
 

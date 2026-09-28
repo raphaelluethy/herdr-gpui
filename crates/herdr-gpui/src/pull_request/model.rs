@@ -45,6 +45,10 @@ pub(crate) struct PullRequest {
     pub review_decision: ReviewDecision,
     #[serde(skip)]
     pub checks_summary: String,
+    /// Which forge this came from; decides its wording and whether line
+    /// counts exist. GraphQL replies are GitHub's, the default.
+    #[serde(skip)]
+    pub forge: crate::forge::Kind,
     #[serde(default)]
     pub(super) status_check_rollup: Option<Vec<Check>>,
     pub(super) head_repository_owner: Owner,
@@ -177,6 +181,16 @@ pub(super) struct Check {
 }
 
 impl Check {
+    /// A GitLab head pipeline, which reports one overall status.
+    pub(super) fn pipeline(outcome: Outcome) -> Self {
+        Self {
+            kind: CheckKind::StatusContext,
+            state: outcome,
+            status: CheckStatus::Completed,
+            conclusion: outcome,
+        }
+    }
+
     pub(super) fn outcome(&self) -> Outcome {
         match self.kind {
             CheckKind::StatusContext => self.state,
@@ -296,6 +310,25 @@ impl PullRequest {
             // from pending checks without borrowing a lifecycle color.
             MergeState::Blocked | MergeState::Behind => theme.palette[208],
             _ => theme.palette[3],
+        }
+    }
+
+    /// The number as its forge writes it: `#8`, or `!8` for a merge request.
+    pub fn reference(&self) -> String {
+        self.forge.change_reference(self.number)
+    }
+
+    /// "pull request" or "merge request".
+    pub fn noun(&self) -> &'static str {
+        self.forge.change_noun()
+    }
+
+    /// Added and deleted lines, when the forge reports them. GitLab's merge
+    /// request API does not, and a made-up `+0 -0` would read as an empty diff.
+    pub fn line_counts(&self) -> Option<(u64, u64)> {
+        match self.forge {
+            crate::forge::Kind::GitHub => Some((self.additions, self.deletions)),
+            crate::forge::Kind::GitLab => None,
         }
     }
 
