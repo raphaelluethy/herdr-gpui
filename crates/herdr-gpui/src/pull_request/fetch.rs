@@ -473,6 +473,7 @@ impl Streams {
             .map(|(index, reader)| Sink {
                 reader,
                 bytes: Vec::new(),
+                #[cfg(unix)]
                 eof: false,
                 limit: match (self, index) {
                     (Self::Split, 1) => Limit::Truncate(DIAGNOSTIC_LIMIT),
@@ -511,6 +512,8 @@ impl Limit {
 struct Sink<R> {
     reader: R,
     bytes: Vec<u8>,
+    /// Unix polls every stream in turn; Windows reads each to its end on a thread.
+    #[cfg(unix)]
     eof: bool,
     limit: Limit,
 }

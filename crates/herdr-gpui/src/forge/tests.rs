@@ -1,7 +1,5 @@
 #![allow(clippy::unwrap_used)]
 
-#[cfg(unix)]
-use super::fake::Fake;
 use super::{
     Access, Forges, Kind, Remote, Variable,
     cli::{self, diagnostic, failure, locate_in, redact},
@@ -9,11 +7,9 @@ use super::{
     github_access, probe,
 };
 use crate::{Error, config::GitHubCli, pull_request::Output};
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{path::Path, sync::Arc, time::Instant};
+#[cfg(unix)]
+use {super::fake::Fake, std::time::Duration};
 
 fn token(text: &str) -> Arc<secrecy::SecretString> {
     Arc::new(text.into())
