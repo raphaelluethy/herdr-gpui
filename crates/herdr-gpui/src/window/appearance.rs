@@ -18,21 +18,37 @@ use herdr_client::protocol::{
 /// the theme whose colors it answers with.
 pub(crate) type ReportedTheme = (bool, Theme);
 
+/// Whether the operating system, as this window sees it, is in dark mode.
+pub(crate) fn system_is_dark(window: &Window) -> bool {
+    matches!(
+        window.appearance(),
+        WindowAppearance::Dark | WindowAppearance::VibrantDark
+    )
+}
+
 impl HerdrWindow {
-    /// Whether the app is in dark mode: the forced choice, else the system's.
-    pub(crate) fn is_dark(&self, window: &Window) -> bool {
-        self.config.appearance.is_dark(|| {
-            matches!(
-                window.appearance(),
-                WindowAppearance::Dark | WindowAppearance::VibrantDark
-            )
-        })
+    /// Follows the forced mode, else the system's, showing that mode's
+    /// theme when `theme` pairs one for each.
+    pub(crate) fn sync_appearance(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let dark = self.config.appearance.is_dark(|| system_is_dark(window));
+        if dark == self.dark {
+            return;
+        }
+        self.dark = dark;
+        let theme = self.themes.pick(dark).clone();
+        // A theme preview stays on screen; cancelling it returns to the new mode.
+        if self.retarget_theme_preview(&theme) {
+            return;
+        }
+        self.theme = theme;
+        crate::log_window::set_appearance(&self.config, &self.theme, cx);
+        cx.notify();
     }
 
     /// Tells the daemon which colors and mode this client shows, whenever
     /// either changes or a connection that has not heard them takes over.
-    pub(crate) fn report_host_theme(&mut self, window: &Window) {
-        let dark = self.is_dark(window);
+    pub(crate) fn report_host_theme(&mut self) {
+        let dark = self.dark;
         if self
             .sent_host_theme
             .as_ref()

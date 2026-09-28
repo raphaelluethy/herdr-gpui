@@ -1103,6 +1103,8 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
             ..Default::default()
         },
         theme: Default::default(),
+        themes: Default::default(),
+        dark: true,
         config_load: None,
         font_size_saves: Default::default(),
         config_watch: None,
