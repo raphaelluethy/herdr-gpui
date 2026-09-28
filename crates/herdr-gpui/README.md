@@ -300,6 +300,42 @@ already waiting in a connection inbox from the disabled period are discarded too
 Failed reloads preserve current settings. QA
 previews remain available regardless of delivery settings.
 
+Choose light or dark mode from **View > Appearance** or the Appearance switch in
+Preferences; both save the choice to `config-gpui.local.toml`, or write it by
+hand as a top-level line there:
+
+```toml
+appearance = "light" # or "dark"; "system" (the default) follows the OS
+```
+
+Programs in the terminals see the result. Each connection reports the mode, and
+the theme's foreground, background, and 256-color palette, to the daemon, which
+answers the programs' color queries (OSC 10, 11, and 4) and color-scheme reports
+(DSR 996 and mode 2031) with them while this window is its foreground client. A
+shell prompt, editor, or agent that asks the terminal therefore follows the
+forced mode rather than the operating system's. It cannot change what a program
+reads from the OS directly, such as macOS `defaults`. On macOS the forced mode
+also drives the native window frame; GPUI has no such override on Linux or
+Windows, where the app draws its own frame from the theme.
+
+To have the app's own colors switch too, choose a theme for each mode under
+**Light theme** and **Dark theme** in Preferences; the mode on screen is marked.
+Each saves its own setting, which you can also write by hand:
+
+```toml
+light_theme = "Catppuccin Latte"
+dark_theme = "Catppuccin Mocha"
+```
+
+Either one overrides what `theme` names for that mode, so setting only one
+leaves the other on `theme`. `theme` also accepts Ghostty's pair syntax,
+`theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"`.
+
+Every window shows the current mode's theme and swaps when the mode changes,
+whether forced or following the system. The Themes command picks the theme on
+screen: the current mode's own setting when it has one, else `theme` (the
+current mode's half of a pair, or a single theme for both modes).
+
 Choose the sidebar layout from **View > Layout**, which lists every layout,
 checks the one in use, switches at once, and saves the choice to
 `config-gpui.local.toml`. The same setting can be written by hand as a
@@ -965,7 +1001,8 @@ Windows setup) nothing is saved and the window says so.
   reads nor downloads block rendering; sign-out discards profile refresh results.
 - In-app sidebar menu for settings information, keybinds, config reload, update
   information, and detach/reconnect. Styled Preferences include Appearance,
-  Fonts, Configuration, and Connection sections, with theme selection and GUI
+  Fonts, Configuration, and Connection sections, with a System/Light/Dark
+  appearance switch, a theme for each mode, and GUI
   config reload; a searchable installed-font picker can set all four families
   together or each independently (including Platform default), while sizes have
   −/+ controls and editable whole-number fields (8–48; Enter or leave to save,

@@ -6,7 +6,7 @@
 //! they belong to. Settings from this machine's config stay here, and a
 //! request using them runs here whichever host is selected.
 
-use super::{cookies::CookieJar, model::Provider, service::Setting, settings::ProviderSettings};
+use super::{model::Provider, service::Setting, settings::ProviderSettings};
 use crate::{Error, Result};
 use secrecy::{ExposeSecret, SecretString};
 use std::{
@@ -56,7 +56,7 @@ impl From<SecretString> for Secret {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HostPath {
     variable: Option<&'static str>,
-    /// Relative to the home directory unless absolute.
+    /// Relative to the home directory.
     base: &'static str,
     rest: String,
 }
@@ -84,21 +84,12 @@ impl HostPath {
         }
     }
 
-    pub fn absolute(path: impl Into<String>) -> Self {
-        Self {
-            variable: None,
-            base: "/",
-            rest: path.into().trim_start_matches('/').to_owned(),
-        }
-    }
-
     fn local(&self) -> Option<std::path::PathBuf> {
         let base = match (self.variable, self.base) {
             (Some(variable), base) => std::env::var_os(variable)
                 .filter(|value| !value.is_empty())
                 .map(std::path::PathBuf::from)
                 .or_else(|| crate::config::home().ok().map(|home| home.join(base)))?,
-            (None, "/") => std::path::PathBuf::from("/"),
             (None, base) => crate::config::home().ok()?.join(base),
         };
         Some(if self.rest.is_empty() {
@@ -114,26 +105,19 @@ impl HostPath {
             (Some(variable), base) => {
                 format!("\"${{{variable}:-$HOME/{}}}\"", base.replace('"', ""))
             }
-            (None, "/") => String::new(),
             (None, "") => "\"$HOME\"".into(),
             (None, base) => format!("\"$HOME\"/{}", quote(base)),
         };
-        match (base.is_empty(), self.rest.is_empty()) {
-            (true, _) => quote(&format!("/{}", self.rest)),
-            (false, true) => base,
-            (false, false) => format!("{base}/{}", quote(&self.rest)),
+        if self.rest.is_empty() {
+            base
+        } else {
+            format!("{base}/{}", quote(&self.rest))
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Method {
-    Get,
-    Post,
-}
-
-/// A piece of a header or body: literal text, or a secret spliced in where
-/// the secret lives.
+/// A piece of a header: literal text, or a secret spliced in where the
+/// secret lives.
 #[derive(Clone, Debug)]
 pub(crate) enum Part {
     Text(String),
@@ -141,29 +125,19 @@ pub(crate) enum Part {
 }
 
 #[derive(Clone, Debug)]
+/// A GET request, the only kind the providers make.
 pub(crate) struct Request {
-    pub method: Method,
     pub url: String,
     pub headers: Vec<(String, Vec<Part>)>,
-    pub body: Option<Vec<Part>>,
     pub timeout: Duration,
 }
 
 impl Request {
     pub fn get(url: impl Into<String>) -> Self {
         Self {
-            method: Method::Get,
             url: url.into(),
             headers: Vec::new(),
-            body: None,
             timeout: HTTP_TIMEOUT,
-        }
-    }
-
-    pub fn post(url: impl Into<String>) -> Self {
-        Self {
-            method: Method::Post,
-            ..Self::get(url)
         }
     }
 
@@ -188,21 +162,6 @@ impl Request {
         self.secret_header("Authorization", "Bearer ", token)
     }
 
-    pub fn cookie(self, cookies: &Secret) -> Self {
-        self.secret_header("Cookie", "", cookies)
-    }
-
-    /// A JSON body with no secrets in it.
-    pub fn json(self, body: impl Into<String>) -> Self {
-        self.header("Content-Type", "application/json")
-            .body(vec![Part::Text(body.into())])
-    }
-
-    pub fn body(mut self, parts: Vec<Part>) -> Self {
-        self.body = Some(parts);
-        self
-    }
-
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -212,7 +171,6 @@ impl Request {
         self.headers
             .iter()
             .flat_map(|(_, parts)| parts)
-            .chain(self.body.iter().flatten())
             .filter_map(|part| match part {
                 Part::Secret(secret) => Some(secret),
                 Part::Text(_) => None,
@@ -260,10 +218,6 @@ pub(crate) struct Probe<'a> {
     exec: &'a mut Exec,
     provider: Provider,
     settings: Option<&'a ProviderSettings>,
-    cookies: &'a mut CookieJar,
-    /// Whether the config asked for this provider, which is what allows
-    /// reading browser cookies for it.
-    requested: bool,
 }
 
 impl<'a> Probe<'a> {
@@ -271,15 +225,11 @@ impl<'a> Probe<'a> {
         exec: &'a mut Exec,
         provider: Provider,
         settings: Option<&'a ProviderSettings>,
-        cookies: &'a mut CookieJar,
-        requested: bool,
     ) -> Self {
         Self {
             exec,
             provider,
             settings,
-            cookies,
-            requested,
         }
     }
 
@@ -312,14 +262,6 @@ impl<'a> Probe<'a> {
                 })
             })
             .map(Secret::from)
-    }
-
-    /// A setting that is not a secret, such as a base URL or a team id.
-    pub fn text_setting(&self, name: &str) -> Option<String> {
-        match self.setting(name)?.0 {
-            Held::Here(value) => Some(value.expose_secret().trim().to_owned()),
-            Held::There(_) => None,
-        }
     }
 
     fn declared(&self, name: &str) -> Option<&'static Setting> {
@@ -356,43 +298,9 @@ impl<'a> Probe<'a> {
         }
     }
 
-    pub fn exists(&mut self, path: &HostPath) -> bool {
-        match self.exec {
-            Exec::Local => path.local().is_some_and(|path| path.exists()),
-            Exec::Remote(shell) => shell
-                .run(&format!("[ -e {} ]", path.remote()), STEP_TIMEOUT)
-                .is_ok_and(|output| output.success),
-        }
-    }
-
-    /// A file that holds nothing secret, such as a quota report, brought back.
-    pub fn read(&mut self, path: &HostPath) -> Option<String> {
-        match self.exec {
-            Exec::Local => {
-                read_local(&path.local()?).and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
-            }
-            Exec::Remote(shell) => shell
-                .run(&format!("cat -- {}", path.remote()), STEP_TIMEOUT)
-                .ok()
-                .filter(|output| output.success)
-                .map(|output| output.stdout),
-        }
-    }
-
-    /// A macOS keychain item's password on the probed host.
     /// A macOS keychain generic password on the probed host (`security -w`).
     pub fn keychain(&mut self, service: &str, account: Option<&str>) -> Option<Secret> {
-        self.security("find-generic-password", service, account)
-    }
-
-    /// A macOS keychain internet password, keyed by server, as some editors
-    /// store their sign-in.
-    pub fn keychain_internet(&mut self, server: &str, account: Option<&str>) -> Option<Secret> {
-        self.security("find-internet-password", server, account)
-    }
-
-    fn security(&mut self, kind: &str, service: &str, account: Option<&str>) -> Option<Secret> {
-        let mut args = vec![kind, "-s", service, "-w"];
+        let mut args = vec!["find-generic-password", "-s", service, "-w"];
         if let Some(account) = account {
             args.extend(["-a", account]);
         }
@@ -464,88 +372,6 @@ impl<'a> Probe<'a> {
         (!text.is_empty()).then(|| text.to_owned())
     }
 
-    /// A command on the probed host, with the usual per-user install
-    /// directories on its PATH. Its output is brought back, so it must not
-    /// print secrets.
-    pub fn command(&mut self, program: &str, args: &[&str], timeout: Duration) -> Result<Output> {
-        match self.exec {
-            Exec::Local => {
-                let mut command = Command::new(program);
-                command
-                    .args(args)
-                    .env("PATH", local_path())
-                    .env("NO_COLOR", "1");
-                let (success, bytes) = output(&mut command, timeout, "run a provider command")?;
-                Ok(Output {
-                    success,
-                    stdout: String::from_utf8_lossy(&bytes).into_owned(),
-                })
-            }
-            Exec::Remote(shell) => shell.run(
-                &format!(
-                    "NO_COLOR=1 {} {} </dev/null 2>/dev/null",
-                    quote(program),
-                    args.iter()
-                        .map(|arg| quote(arg))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                timeout,
-            ),
-        }
-    }
-
-    /// The Cookie header for a web sign-in: the `cookie` setting when set,
-    /// else, on this machine and only for providers the config asked for,
-    /// the named cookies for `domains` from Chrome or Safari.
-    pub fn cookies(&mut self, domains: &[&str], names: &[&str]) -> Option<Secret> {
-        if let Some(cookie) = self.setting("cookie") {
-            return Some(cookie);
-        }
-        if !self.requested {
-            return None;
-        }
-        self.cookies
-            .header(domains, names)
-            .map(|header| Secret::from(SecretString::from(header)))
-    }
-
-    /// Like [`Probe::cookies`], but satisfied by whichever of `names` the
-    /// browser has, for services that renamed their session cookie.
-    pub fn cookies_any(&mut self, domains: &[&str], names: &[&str]) -> Option<Secret> {
-        if let Some(cookie) = self.setting("cookie") {
-            return Some(cookie);
-        }
-        if !self.requested {
-            return None;
-        }
-        names.iter().find_map(|name| {
-            self.cookies
-                .header(domains, &[name])
-                .map(|header| Secret::from(SecretString::from(header)))
-        })
-    }
-
-    /// One cookie's bare value, for services that want it as a bearer token
-    /// or echoed in a header: from the `cookie` setting's header, else from
-    /// the browser as [`Probe::cookies`] reads it.
-    pub fn cookie_value(&mut self, domains: &[&str], name: &str) -> Option<Secret> {
-        let header = match self.setting("cookie") {
-            Some(Secret(Held::Here(header))) => Zeroizing::new(header.expose_secret().to_owned()),
-            Some(Secret(Held::There(_))) => return None,
-            None if self.requested => Zeroizing::new(self.cookies.header(domains, &[name])?),
-            None => return None,
-        };
-        cookie_in(&header, name).map(|value| Secret::from(SecretString::from(value)))
-    }
-
-    /// A host environment variable that is not secret, such as a local
-    /// server address.
-    pub fn env_text(&mut self, name: &str) -> Option<String> {
-        let value = self.env(name)?;
-        self.reveal(&value)
-    }
-
     pub fn http(&mut self, request: Request) -> Result<Response> {
         match self.place(&request)? {
             Place::Here => http_local(&request),
@@ -560,23 +386,6 @@ impl<'a> Probe<'a> {
     /// error, as [`Response::ok`] maps it.
     pub fn body(&mut self, request: Request) -> Result<String> {
         self.http(request)?.ok()
-    }
-
-    /// Exchanges one credential for another, such as a short-lived API token,
-    /// keeping the new one where the request ran.
-    pub fn exchange(&mut self, request: Request, path: &[&str]) -> Result<Secret> {
-        match self.place(&request)? {
-            Place::Here => {
-                let body = http_local(&request)?.ok()?;
-                json_field(&body, path)
-                    .map(|value| Secret::from(SecretString::from(value)))
-                    .ok_or(Error::UsageJson(serde_json::error::Category::Data))
-            }
-            Place::There => match self.exec {
-                Exec::Remote(shell) => shell.exchange(&request, path),
-                Exec::Local => Err(Error::UsageMixedSecrets),
-            },
-        }
     }
 
     /// A request runs where its secrets are: remote secrets on the host,
@@ -603,22 +412,6 @@ enum Place {
     There,
 }
 
-/// Agents install into per-user directories an app launched from the Dock
-/// does not have on its PATH.
-fn local_path() -> String {
-    let home = crate::config::home()
-        .map(|home| home.display().to_string())
-        .unwrap_or_default();
-    let mut path = format!(
-        "{home}/.local/bin:{home}/.cargo/bin:{home}/.bun/bin:{home}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin"
-    );
-    if let Some(inherited) = std::env::var_os("PATH") {
-        path.push(':');
-        path.push_str(&inherited.to_string_lossy());
-    }
-    path
-}
-
 fn read_local(path: &std::path::Path) -> Option<Zeroizing<Vec<u8>>> {
     let mut bytes = Zeroizing::new(Vec::new());
     std::fs::File::open(path)
@@ -627,16 +420,6 @@ fn read_local(path: &std::path::Path) -> Option<Zeroizing<Vec<u8>>> {
         .read_to_end(&mut bytes)
         .ok()?;
     (bytes.len() <= LIMIT).then_some(bytes)
-}
-
-/// The value of cookie `name` in a `name=value; …` header.
-pub(super) fn cookie_in(header: &str, name: &str) -> Option<String> {
-    header.split(';').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key.trim() == name)
-            .then(|| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-    })
 }
 
 /// The string or number at `path`; array steps are indices.
@@ -683,27 +466,11 @@ fn http_local(request: &Request) -> Result<Response> {
         value.set_sensitive(parts.iter().any(|part| matches!(part, Part::Secret(_))));
         headers.push((name.as_str(), value));
     }
-    let result = match request.method {
-        Method::Get => {
-            let mut call = agent.get(&request.url);
-            for (name, value) in headers {
-                call = call.header(name, value);
-            }
-            call.call()
-        }
-        Method::Post => {
-            let mut call = agent.post(&request.url);
-            for (name, value) in headers {
-                call = call.header(name, value);
-            }
-            let body = match &request.body {
-                Some(parts) => text_of(parts).ok_or(Error::UsageMixedSecrets)?,
-                None => Zeroizing::new(String::new()),
-            };
-            call.send(body.as_bytes())
-        }
-    };
-    let mut response = result.map_err(Error::UsageNetwork)?;
+    let mut call = agent.get(&request.url);
+    for (name, value) in headers {
+        call = call.header(name, value);
+    }
+    let mut response = call.call().map_err(Error::UsageNetwork)?;
     let status = response.status().as_u16();
     let mut body = String::new();
     response
@@ -929,17 +696,13 @@ impl Shell {
     }
 
     /// `curl -K` reads the request from a here-document, so secrets expand
-    /// inside the host's shell and never appear in an argument list. `flags`
-    /// go before the config and `pipe` after it on the same line, as a
-    /// here-document requires.
-    fn curl(request: &Request, flags: &str, pipe: &str) -> Option<String> {
+    /// inside the host's shell and never appear in an argument list. The
+    /// status follows the body after a marker.
+    fn curl(request: &Request) -> Option<String> {
         if request.url.contains(['\n', '"']) {
             return None;
         }
         let mut config = format!("url = \"{}\"\n", escape(&request.url));
-        if request.method == Method::Post {
-            config.push_str("request = \"POST\"\n");
-        }
         for (name, parts) in &request.headers {
             config.push_str(&format!(
                 "header = \"{}: {}\"\n",
@@ -947,18 +710,14 @@ impl Shell {
                 splice(parts)?
             ));
         }
-        if let Some(body) = &request.body {
-            config.push_str(&format!("data-raw = \"{}\"\n", splice(body)?));
-        }
         let limit = request.timeout.as_secs().max(1);
         Some(format!(
-            "curl -sS --max-time {limit} {flags} -K /dev/fd/3 3<<@@herdr-curl {pipe}\n{config}@@herdr-curl\n"
+            "curl -sS --max-time {limit} -w '\\n@@herdr-status %{{http_code}}' -K /dev/fd/3 3<<@@herdr-curl\n{config}@@herdr-curl\n"
         ))
     }
 
     fn http(&mut self, request: &Request) -> Result<Response> {
-        let curl = Self::curl(request, "-w '\\n@@herdr-status %{http_code}'", "")
-            .ok_or(Error::UsageMixedSecrets)?;
+        let curl = Self::curl(request).ok_or(Error::UsageMixedSecrets)?;
         let output = self.run(
             &format!("command -v curl >/dev/null 2>&1 || exit 127\n{curl}"),
             request.timeout + Duration::from_secs(5),
@@ -974,27 +733,6 @@ impl Shell {
             status: status.trim().parse().unwrap_or(0),
             body: body.to_owned(),
         })
-    }
-
-    fn exchange(&mut self, request: &Request, path: &[&str]) -> Result<Secret> {
-        let keys = path
-            .iter()
-            .map(|key| quote(key))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let curl = Self::curl(request, "-f", &format!("| herdr_field {keys}"))
-            .ok_or(Error::UsageMixedSecrets)?;
-        self.variables += 1;
-        let variable = format!("herdr_s{}", self.variables);
-        let output = self.run(
-            &format!("{variable}=$({curl}) && [ -n \"${variable}\" ]"),
-            request.timeout + Duration::from_secs(5),
-        )?;
-        if output.success {
-            Ok(Secret(Held::There(variable)))
-        } else {
-            Err(Error::UsageRejected)
-        }
     }
 }
 

@@ -5,7 +5,7 @@
 use crate::{
     APP_VERSION, HerdrWindow, Hide, HideOthers, Quit, ShowAll, ShowLogs, WINDOW_TITLE, app_icon,
     bind_keys, cli,
-    config::{Config, Theme},
+    config::{Config, Themes},
     diagnostics, icons, log_window, menus, titlebar, updater,
 };
 #[cfg(feature = "integration-test")]
@@ -19,7 +19,9 @@ use herdr_client::ConnectTarget;
 #[derive(Clone, Default)]
 pub(crate) struct InitialAppearance {
     pub config: Config,
-    pub theme: Theme,
+    /// Both modes' themes: whether the system is dark is known only once a
+    /// window exists, and a window follows it afterwards.
+    pub themes: Themes,
     pub error: Option<String>,
 }
 
@@ -27,10 +29,10 @@ impl Global for InitialAppearance {}
 
 impl InitialAppearance {
     fn load(load: impl FnOnce() -> crate::Result<Config>) -> Self {
-        match load().and_then(|config| Ok((config.theme()?, config))) {
-            Ok((theme, config)) => Self {
+        match load().and_then(|config| Ok((config.themes()?, config))) {
+            Ok((themes, config)) => Self {
                 config,
-                theme,
+                themes,
                 error: None,
             },
             Err(error) => Self {
@@ -213,6 +215,11 @@ pub(crate) fn run() -> std::process::ExitCode {
             if mode == LaunchMode::Normal {
                 crate::control::install(cx);
             }
+            // Force the native frame before the first window opens, so it
+            // never flashes the system's mode.
+            if appearance.config.appearance != crate::config::Appearance::System {
+                crate::window::apply_native_appearance(appearance.config.appearance, cx);
+            }
             cx.set_global(appearance);
             app_icon::install();
             #[cfg(target_os = "macos")]
@@ -294,10 +301,11 @@ pub(crate) fn run() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, InitialAppearance, Theme};
+    use super::{Config, InitialAppearance};
     #[cfg(feature = "integration-test")]
     use super::{ConnectTarget, HerdrWindow};
     use crate::config::LayoutMode;
+    use crate::config::{Theme, Themes};
     #[cfg(feature = "integration-test")]
     use gpui::px;
 
@@ -315,8 +323,22 @@ mod tests {
             appearance.config.layout.mode,
             LayoutMode::from(crate::config::Density::Compact)
         );
-        assert_eq!(Some(appearance.theme), Theme::builtin("Nord"));
+        assert_eq!(
+            Some(appearance.themes),
+            Theme::builtin("Nord").map(Themes::single)
+        );
         assert!(appearance.error.is_none());
+        let paired = InitialAppearance::load(|| {
+            Ok(Config {
+                theme: "light:Catppuccin Latte,dark:Nord".into(),
+                ..Default::default()
+            })
+        });
+        assert_eq!(
+            Some(paired.themes.light),
+            Theme::builtin("Catppuccin Latte")
+        );
+        assert_eq!(Some(paired.themes.dark), Theme::builtin("Nord"));
         for appearance in [
             InitialAppearance::load(|| Err(crate::Error::MissingHome)),
             InitialAppearance::load(|| {
@@ -330,7 +352,7 @@ mod tests {
                 appearance.config.layout.mode,
                 LayoutMode::from(crate::config::Density::Normal)
             );
-            assert_eq!(appearance.theme, Theme::default());
+            assert_eq!(appearance.themes, Themes::default());
             assert!(appearance.error.is_some());
         }
     }

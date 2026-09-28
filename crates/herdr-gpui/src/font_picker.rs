@@ -183,8 +183,8 @@ impl HerdrWindow {
                 }
                 let mut config = Config::load()?;
                 config.resolve_font_fallbacks(|| text_system.all_font_names());
-                let theme = config.theme()?;
-                Ok((config, theme))
+                let themes = config.themes()?;
+                Ok((config, themes))
             },
             cx,
         );

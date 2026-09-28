@@ -23,10 +23,7 @@ unwrap_used = "deny"
 [workspace.dependencies]
 url = "2"
 anyhow               = "1"
-aes                  = "0.9.3"
-cbc                  = { features = ["block-padding"], version = "0.2.1" }
 percent-encoding     = "2"
-pbkdf2               = { default-features = false, features = ["hmac"], version = "0.13.0" }
 bincode              = { default-features = false, features = ["serde", "std"], version = "2" }
 chrono               = { default-features = false, features = ["clock"], version = "0.4" }
 cocoa                = "0.27"
@@ -58,14 +55,12 @@ block2               = "0.6.2"
 objc2-core-foundation = { default-features = false, features = ["CFCGTypes", "std"], version = "0.3.2" }
 objc2-web-kit        = { default-features = false, features = ["WKSnapshotConfiguration", "WKWebView", "block2", "objc2-app-kit", "objc2-core-foundation", "std"], version = "0.3.2" }
 raw-window-handle    = "0.6"
-rusqlite             = { features = ["bundled"], version = "0.37" }
 rodio                = { default-features = false, features = ["playback", "symphonia-mp3", "tracing"], version = "0.22.2" }
 rustix               = { features = ["event", "fs", "process"], version = "=1.1.5" }
 secrecy              = { features = ["serde"], version = "=0.10.3" }
 security-framework   = "=3.7.0"
 serde                = { features = ["derive"], version = "1" }
 serde_json           = "1"
-sha1                 = "0.11.0"
 sha2                 = "0.11.0"
 tar                  = "0.4"
 tempfile             = "3"

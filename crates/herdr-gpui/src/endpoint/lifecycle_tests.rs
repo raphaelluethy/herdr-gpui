@@ -273,6 +273,151 @@ fn first_focus_claims_geometry_without_a_window_resize(cx: &mut gpui::TestAppCon
     });
 }
 
+/// Programs in the terminals ask the daemon which mode and colors the client
+/// shows, so each connection reports them, and again whenever they change.
+#[gpui::test]
+fn the_host_theme_follows_the_forced_appearance_and_the_theme(cx: &mut gpui::TestAppContext) {
+    use crate::config::{Appearance, Theme, Themes};
+    use std::sync::Mutex;
+
+    let (endpoint, mut server) = connected_endpoint("host-theme");
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.read_with(cx, |fixture, _| fixture.0.clone());
+    let expect = |server: &mut Server, dark: bool, theme: &Theme| {
+        let appearance = if dark {
+            ClientHostAppearance::Dark
+        } else {
+            ClientHostAppearance::Light
+        };
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellHostTheme {
+                update: ClientHostThemeUpdate::Appearance(appearance)
+            }
+        );
+        for kind in [
+            ClientHostDefaultColorKind::Foreground,
+            ClientHostDefaultColorKind::Background,
+        ] {
+            let ClientMessage::ClientShellHostTheme {
+                update: ClientHostThemeUpdate::DefaultColor { kind: got, color },
+            } = server.receive()
+            else {
+                panic!("expected a default color");
+            };
+            let rgb = match kind {
+                ClientHostDefaultColorKind::Foreground => theme.foreground,
+                ClientHostDefaultColorKind::Background => theme.background,
+            };
+            assert_eq!(got, kind);
+            assert_eq!(
+                (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b),
+                rgb
+            );
+        }
+        assert!(matches!(
+            server.receive(),
+            ClientMessage::ClientShellHostTheme {
+                update: ClientHostThemeUpdate::PaletteColors(colors)
+            } if colors.len() == 256
+        ));
+    };
+    let saved = Arc::new(Mutex::new(Vec::new()));
+    let choose = |appearance: Appearance, cx: &mut gpui::VisualTestContext| {
+        let record = saved.clone();
+        view.update(cx, |view, cx| {
+            view.set_appearance_with(
+                appearance,
+                move |appearance| {
+                    record.lock().unwrap().push(appearance);
+                    Ok(())
+                },
+                cx,
+            )
+        });
+    };
+    let report = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.sync_appearance(window, cx);
+                view.report_host_theme();
+            })
+        });
+    };
+    view.update(cx, |view, _| {
+        view.endpoints = vec![endpoint];
+        view.selected_endpoint = 0;
+        view.reset_selected();
+    });
+    let theme = view.read_with(cx, |view, _| view.theme.clone());
+    // The test platform's system mode is light.
+    report(cx);
+    expect(&mut server, false, &theme);
+    // A forced mode overrides the system's; an unchanged one is not resent.
+    choose(Appearance::Dark, cx);
+    report(cx);
+    report(cx);
+    expect(&mut server, true, &theme);
+    choose(Appearance::Dark, cx);
+    choose(Appearance::Light, cx);
+    report(cx);
+    expect(&mut server, false, &theme);
+    // A theme pair shows, and reports, the theme of the mode in effect.
+    let latte = Theme::builtin("Catppuccin Latte").unwrap();
+    let nord = Theme::builtin("Nord").unwrap();
+    view.update(cx, |view, _| {
+        view.themes = Themes {
+            light: latte.clone(),
+            dark: nord.clone(),
+        };
+        // Loading a config shows the current mode's theme.
+        view.theme = view.themes.pick(view.dark).clone();
+    });
+    report(cx);
+    expect(&mut server, false, &latte);
+    choose(Appearance::Dark, cx);
+    report(cx);
+    expect(&mut server, true, &nord);
+    view.read_with(cx, |view, _| assert_eq!(view.theme, nord));
+    // A single theme is reported with the forced mode, not its brightness.
+    choose(Appearance::Light, cx);
+    view.update(cx, |view, _| {
+        view.themes = Themes::single(nord.clone());
+        view.theme = nord.clone();
+    });
+    report(cx);
+    expect(&mut server, false, &nord);
+    // A fresh connection has not heard it yet.
+    view.update(cx, |view, _| view.reset_selected());
+    report(cx);
+    expect(&mut server, false, &nord);
+    // Nothing else was queued: focus is the next message on the wire.
+    view.update(cx, |view, _| {
+        let handle = view.endpoints[0].connection.handle.as_ref().unwrap();
+        handle.set_focus(&snapshot().boot_id, false).unwrap()
+    });
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellFocus { focused: false }
+    );
+    // Choosing the mode already in use saves nothing. Saves run in the
+    // background, so only which ones happened is certain, not their order.
+    cx.run_until_parked();
+    let mut saved = saved.lock().unwrap().clone();
+    saved.sort_by_key(|appearance| appearance.name());
+    assert_eq!(
+        saved,
+        vec![
+            Appearance::Dark,
+            Appearance::Dark,
+            Appearance::Light,
+            Appearance::Light
+        ]
+    );
+}
+
 fn prepare_mouse(view: &mut HerdrWindow, endpoint: Endpoint) {
     view.endpoints.truncate(1);
     view.endpoints.push(endpoint);
@@ -2969,7 +3114,7 @@ fn qa_play_sound_dispatches_without_daemon_or_pane(cx: &mut gpui::TestAppContext
     cx.update(|window, cx| {
         view.read(cx).focus.clone().focus(window, cx);
         window.draw(cx).clear(cx);
-        let menus = crate::menus(Default::default());
+        let menus = crate::menus(Default::default(), Default::default());
         let qa = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "QA")

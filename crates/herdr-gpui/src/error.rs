@@ -304,20 +304,12 @@ pub enum Error {
     UsageNetwork(#[source] ureq::Error),
     #[error("Could not reach the usage service from this host.")]
     UsageConnect,
-    #[error(
-        "[usage] names unknown provider {0:?}. See the provider list in config-gpui.example.toml."
-    )]
-    UnknownUsageProvider(String),
     #[error("[usage.providers.{provider}] has no setting named {setting:?}.")]
     UnknownUsageSetting { provider: String, setting: String },
     #[error("No sign-in found on this host. Set it up under [usage.providers] in the config.")]
     UsageNotSignedIn,
-    #[error("This account has no plan with usage limits to show.")]
-    UsageNoPlan,
     #[error("Usage request mixes this machine's settings with the remote host's sign-in.")]
     UsageMixedSecrets,
-    #[error("Usage command failed: {0}.")]
-    UsageCommand(&'static str),
     #[error("Saved sign-in cannot be sent as a header.")]
     UsageHeader(#[source] ureq::http::header::InvalidHeaderValue),
     #[error("Saved sign-in was rejected. Open the agent to sign in again.")]
@@ -460,6 +452,8 @@ pub enum Error {
     InvalidSidebarGap,
     #[error("theme must be a name, absolute path, or ~/ path")]
     InvalidThemePath,
+    #[error("theme pairs must name one theme each, as \"light:NAME,dark:NAME\"")]
+    InvalidThemePair,
     #[error("keybindings.{0} is not a command; see the keybindings list in config-gpui.toml")]
     UnknownKeybinding(String),
     #[error("keybindings.{command}: invalid keystroke {keystroke:?}")]

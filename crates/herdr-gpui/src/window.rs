@@ -3,10 +3,12 @@
 //! split by responsibility across the submodules below; the fields live here
 //! because every one of them describes this window's own presentation state.
 
+mod appearance;
 mod clipboard;
 mod commands;
 mod file_drop;
 mod flash;
+pub(crate) use appearance::apply_native_appearance;
 pub(crate) use flash::Flash;
 mod image_source;
 mod images;
@@ -56,7 +58,12 @@ pub(crate) struct HerdrWindow {
     /// write straight to `config.terminal.size`, so this is what Reset Font
     /// Size restores; a session adjustment never reaches disk.
     pub(crate) configured_terminal_size: f32,
+    /// The theme on screen: the current mode's of `themes`, or a picker preview.
     pub(crate) theme: config::Theme,
+    /// Both modes' themes from the config.
+    pub(crate) themes: config::Themes,
+    /// Whether the app is in dark mode, forced or following the system.
+    pub(crate) dark: bool,
     pub(crate) config_load: Option<Task<()>>,
     pub(crate) font_size_saves: crate::font_sizes::FontSizeSaves,
     pub(crate) config_watch: Option<Task<()>>,
@@ -83,6 +90,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) pending_resize: Option<(ConnectOptions, std::time::Instant)>,
     pub(crate) active: bool,
     pub(crate) sent_focus: Option<bool>,
+    /// The host theme this window's connection last reported, if it has.
+    pub(crate) sent_host_theme: Option<appearance::ReportedTheme>,
     pub(crate) bounds: Bounds<Pixels>,
     /// Last title pushed to the OS, so the window is renamed only when it changes.
     pub(crate) title: String,
@@ -290,6 +299,8 @@ impl HerdrWindow {
         }
         self.resize();
         self.report_focus();
+        self.sync_appearance(window, cx);
+        self.report_host_theme();
         self.sync_window_title(window);
     }
 
@@ -346,9 +357,13 @@ impl HerdrWindow {
             .unwrap_or_default();
         let crate::app::InitialAppearance {
             config,
-            theme,
+            themes,
             error,
         } = appearance;
+        let dark = config
+            .appearance
+            .is_dark(|| appearance::system_is_dark(window));
+        let theme = themes.pick(dark).clone();
         let mut this = Self {
             sound: crate::sound::Service::default(),
             updater: updater::Updater::default(),
@@ -356,6 +371,8 @@ impl HerdrWindow {
             configured_terminal_size: config.terminal.size,
             config,
             theme,
+            themes,
+            dark,
             config_load: None,
             font_size_saves: Default::default(),
             config_watch: None,
@@ -384,6 +401,7 @@ impl HerdrWindow {
             pending_resize: None,
             active: window.is_window_active(),
             sent_focus: None,
+            sent_host_theme: None,
             bounds: Bounds::default(),
             title: WINDOW_TITLE.to_owned(),
             cell_width: 9.,

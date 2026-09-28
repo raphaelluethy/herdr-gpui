@@ -1009,6 +1009,8 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
             ..Default::default()
         },
         theme: Default::default(),
+        themes: Default::default(),
+        dark: true,
         config_load: None,
         font_size_saves: Default::default(),
         config_watch: None,
@@ -1047,6 +1049,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         pending_resize: None,
         active: false,
         sent_focus: None,
+        sent_host_theme: None,
         bounds: Bounds::default(),
         title: crate::WINDOW_TITLE.to_owned(),
         cell_width: 9.,
@@ -1744,13 +1747,34 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
     let header = cx.debug_bounds("preferences-header").unwrap();
     let footer = cx.debug_bounds("preferences-footer").unwrap();
     let body = cx.debug_bounds("preferences-body").unwrap();
-    let theme_row = cx.debug_bounds("preferences-theme").unwrap();
+    let theme_row = cx.debug_bounds("preferences-theme-light").unwrap();
+    // The appearance choices wrap inside the narrow panel rather than
+    // spilling past it, above each mode's theme.
+    let appearance = cx.debug_bounds("preferences-appearance").unwrap();
+    assert!(appearance.bottom() <= theme_row.top() + px(1.));
+    let dark_row = cx.debug_bounds("preferences-theme-dark").unwrap();
+    assert!(theme_row.bottom() <= dark_row.top() + px(1.));
+    for id in [
+        "preferences-theme-light-choose",
+        "preferences-theme-dark-choose",
+    ] {
+        let choose = cx.debug_bounds(id).unwrap();
+        assert!(choose.left() >= body.left() && choose.right() <= body.right());
+    }
+    for id in [
+        "preferences-appearance-system",
+        "preferences-appearance-light",
+        "preferences-appearance-dark",
+    ] {
+        let option = cx.debug_bounds(id).unwrap();
+        assert!(option.left() >= body.left() && option.right() <= body.right());
+    }
     assert!(body.size.height > px(0.));
     assert!(header.bottom() <= body.top());
     assert!(body.bottom() <= footer.top());
     cx.simulate_keystrokes("pagedown");
     cx.update(|window, cx| full_draw(window, cx).clear(cx));
-    assert!(cx.debug_bounds("preferences-theme").unwrap().top() < theme_row.top());
+    assert!(cx.debug_bounds("preferences-theme-light").unwrap().top() < theme_row.top());
     assert_eq!(cx.debug_bounds("preferences-header").unwrap(), header);
     assert_eq!(cx.debug_bounds("preferences-footer").unwrap(), footer);
     let close = cx.debug_bounds("preferences-close").unwrap();
@@ -1841,12 +1865,25 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
         }
     }
     cx.simulate_resize(size(px(800.), px(600.)));
-    cx.simulate_keystrokes("cmd-,");
-    cx.update(|window, cx| full_draw(window, cx).clear(cx));
-    let choose_theme = cx.debug_bounds("preferences-choose-theme").unwrap();
-    cx.simulate_click(choose_theme.center(), Default::default());
-    cx.update(|_, cx| assert!(view.read(cx).menu.page == Some(crate::menu::Page::Themes)));
-    cx.simulate_keystrokes("escape");
+    // Each mode's row opens the picker for that mode.
+    for (id, dark) in [
+        ("preferences-theme-light-choose", false),
+        ("preferences-theme-dark-choose", true),
+    ] {
+        cx.simulate_keystrokes("cmd-,");
+        cx.update(|window, cx| full_draw(window, cx).clear(cx));
+        let choose_theme = cx.debug_bounds(id).unwrap();
+        cx.simulate_click(choose_theme.center(), Default::default());
+        cx.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.menu.page == Some(crate::menu::Page::Themes));
+            assert_eq!(
+                view.menu.themes.as_ref().unwrap().target(),
+                crate::theme_picker::ThemeTarget::Mode { dark }
+            );
+        });
+        cx.simulate_keystrokes("escape");
+    }
 
     let search = cx.update(|window, cx| {
         view.update(cx, |view, cx| view.open_theme_picker(window, cx));

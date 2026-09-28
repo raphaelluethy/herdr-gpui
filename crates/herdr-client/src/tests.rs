@@ -549,6 +549,29 @@ fn stale_boot_and_unsupported_commands_never_reach_socket() {
         receive(&mut server),
         ClientMessage::ClientShellFocus { focused: true }
     );
+    let appearance = ClientHostThemeUpdate::Appearance(ClientHostAppearance::Light);
+    client
+        .handle
+        .set_host_theme("boot-v1", appearance.clone())
+        .unwrap();
+    assert_eq!(
+        receive(&mut server),
+        ClientMessage::ClientShellHostTheme { update: appearance }
+    );
+    let white = ClientHostColor {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
+    let full = ClientHostThemeUpdate::PaletteColors((0..=u8::MAX).map(|i| (i, white)).collect());
+    client
+        .handle
+        .set_host_theme("boot-v1", full.clone())
+        .unwrap();
+    assert_eq!(
+        receive(&mut server),
+        ClientMessage::ClientShellHostTheme { update: full }
+    );
     let mut snapshot: Value = serde_json::from_str(SNAPSHOT).unwrap();
     snapshot["boot_id"] = "replacement-boot".into();
     send(
@@ -642,6 +665,16 @@ fn bounded_command_queue_and_outbound_limit_are_explicit() {
     assert!(matches!(
         handle.set_focus("", true),
         Err(Error::MissingBootId)
+    ));
+    // The daemon drops a client that reports more colors than a palette has,
+    // so an oversized update is refused before it takes a queue slot.
+    let black = ClientHostColor { r: 0, g: 0, b: 0 };
+    assert!(matches!(
+        handle.set_host_theme(
+            "boot",
+            ClientHostThemeUpdate::PaletteColors(vec![(0, black); 257])
+        ),
+        Err(Error::HostPaletteTooLarge(257))
     ));
     handle.set_focus("boot", true).unwrap();
     assert!(matches!(handle.set_focus("boot", false), Err(Error::Full)));

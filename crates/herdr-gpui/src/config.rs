@@ -80,6 +80,11 @@ pub(crate) mod corners {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub theme: String,
+    /// The light mode's theme, overriding what `theme` names for it.
+    pub light_theme: Option<String>,
+    /// The dark mode's theme, overriding what `theme` names for it.
+    pub dark_theme: Option<String>,
+    pub appearance: Appearance,
     pub confirm_close_tab: bool,
     pub show_agents: bool,
     /// Plan usage of the selected host's AI services in the status bar.
@@ -107,6 +112,58 @@ pub enum LinkTarget {
     System,
     /// A browser tab in the workspace, where the build can show pages.
     BrowserTab,
+}
+
+/// Whether the app and the programs in its terminals see light or dark mode.
+/// A forced choice overrides the operating system's, for programs that pick
+/// their colors from it, such as shell prompts that ask the terminal.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Appearance {
+    /// Follow the operating system.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    /// Every choice, in the order menus list them.
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    /// The config value that selects it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    /// How menus title it.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::System => "Match System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    /// Whether the app is dark, given whether the operating system is. Asks
+    /// the system only when nothing is forced.
+    pub fn is_dark(self, system_is_dark: impl FnOnce() -> bool) -> bool {
+        match self {
+            Self::System => system_is_dark(),
+            Self::Light => false,
+            Self::Dark => true,
+        }
+    }
+}
+
+impl std::fmt::Display for Appearance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// Whether macOS Option sends Alt shortcuts to a pane or types the character
@@ -576,6 +633,9 @@ impl Default for Config {
         };
         Self {
             theme: "Default".into(),
+            light_theme: None,
+            dark_theme: None,
+            appearance: Appearance::default(),
             github: GitHubConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
@@ -601,6 +661,9 @@ impl Default for Config {
 #[serde(default, deny_unknown_fields)]
 struct Settings {
     theme: Option<String>,
+    light_theme: Option<String>,
+    dark_theme: Option<String>,
+    appearance: Appearance,
     confirm_close_tab: Option<bool>,
     show_agents: Option<bool>,
     usage: crate::usage::UsageConfig,
@@ -954,12 +1017,25 @@ impl Config {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
             }
+            ThemeNames::parse(&theme)?;
             config.theme = theme;
+        }
+        for (key, field) in [
+            (settings.light_theme, &mut config.light_theme),
+            (settings.dark_theme, &mut config.dark_theme),
+        ] {
+            if let Some(name) = key {
+                if name.trim().is_empty() {
+                    return Err(Error::EmptyTheme);
+                }
+                *field = Some(name);
+            }
         }
         config.confirm_close_tab = settings.confirm_close_tab.unwrap_or(true);
         config.show_agents = settings.show_agents.unwrap_or(true);
         settings.usage.validate()?;
         config.usage = settings.usage;
+        config.appearance = settings.appearance;
         config.option_as_alt = settings.option_as_alt;
         config.open_links_in = settings.open_links_in;
         for (name, font, settings) in [
@@ -1025,31 +1101,34 @@ impl Config {
                 }
             }
         }
-        let selected = self.theme.trim();
-        if Path::new(selected).is_absolute() || selected.starts_with("~/") {
-            names.push(self.theme.clone());
+        let selected = self.theme_names()?;
+        for name in [selected.light, selected.dark] {
+            if Path::new(name).is_absolute() || name.starts_with("~/") {
+                names.push(name.to_owned());
+            }
         }
         names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
         names.dedup();
         Ok(names)
     }
 
-    /// Persist only the theme selection, retaining the latest on-disk settings.
-    pub fn save_theme(&self, name: &str) -> Result<()> {
-        self.save_theme_at(name, &Self::path()?)
+    /// Persist only one theme setting, retaining the latest on-disk settings.
+    pub fn save_theme(&self, key: ThemeKey, name: &str) -> Result<()> {
+        self.save_theme_at(key, name, &Self::path()?)
     }
 
-    fn save_theme_at(&self, name: &str, path: &Path) -> Result<()> {
+    fn save_theme_at(&self, key: ThemeKey, name: &str, path: &Path) -> Result<()> {
         let (_lock, local) = Self::prepare_files(path)?;
-        self.save_theme_path(name, &local)
+        self.save_theme_path(key, name, &local)
     }
 
-    fn save_theme_path(&self, name: &str, path: &Path) -> Result<()> {
-        let selected = Self {
-            theme: name.into(),
-            ..self.clone()
-        };
-        selected.theme()?;
+    fn save_theme_path(&self, key: ThemeKey, name: &str, path: &Path) -> Result<()> {
+        let mut selected = self.clone();
+        selected.set_theme(key, name);
+        if key != ThemeKey::Theme && name.trim().is_empty() {
+            return Err(Error::EmptyTheme);
+        }
+        selected.themes()?;
         let result = (|| -> Result<()> {
             let text = match fs::read_to_string(path) {
                 Ok(text) => text,
@@ -1058,10 +1137,10 @@ impl Config {
             };
             let mut document = text.parse::<toml_edit::DocumentMut>()?;
             let mut value = toml_edit::Value::from(name);
-            if let Some(previous) = document.get("theme").and_then(toml_edit::Item::as_value) {
+            if let Some(previous) = document.get(key.name()).and_then(toml_edit::Item::as_value) {
                 *value.decor_mut() = previous.decor().clone();
             }
-            document["theme"] = toml_edit::Item::Value(value);
+            document[key.name()] = toml_edit::Item::Value(value);
             write_config(path, &document.to_string())?;
             Ok(())
         })();
@@ -1097,6 +1176,35 @@ impl Config {
                 }
                 _ => {
                     document.insert("layout", toml_edit::value(mode.name()));
+                }
+            }
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
+    /// Persist the appearance choice to the local overrides, keeping the rest.
+    pub fn save_appearance(appearance: Appearance) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_appearance_path(appearance, &local)
+    }
+
+    fn save_appearance_path(appearance: Appearance, path: &Path) -> Result<()> {
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            match document.get_mut("appearance") {
+                Some(toml_edit::Item::Value(value)) => {
+                    let decor = value.decor().clone();
+                    *value = toml_edit::Value::from(appearance.name());
+                    *value.decor_mut() = decor;
+                }
+                _ => {
+                    document.insert("appearance", toml_edit::value(appearance.name()));
                 }
             }
             write_config(path, &document.to_string())
@@ -1199,15 +1307,102 @@ impl Config {
         result.map_err(|error| error.at_path(path))
     }
 
+    /// The theme `theme` names, when it names a single one, as the theme
+    /// picker's candidates do. A light/dark pair needs [`Self::themes`].
     pub fn theme(&self) -> Result<Theme> {
         self.theme_with_directories(theme_directories)
+    }
+
+    /// The light and dark themes `theme` selects, each resolved once.
+    pub fn themes(&self) -> Result<Themes> {
+        self.themes_with_directories(theme_directories)
+    }
+
+    /// Which theme each mode uses: `light_theme` and `dark_theme` when set,
+    /// else what `theme` names for that mode.
+    pub fn theme_names(&self) -> Result<ThemeNames<'_>> {
+        let mut names = ThemeNames::parse(&self.theme)?;
+        if let Some(light) = &self.light_theme {
+            names.light = light.trim();
+            names.paired = true;
+        }
+        if let Some(dark) = &self.dark_theme {
+            names.dark = dark.trim();
+            names.paired = true;
+        }
+        Ok(names)
+    }
+
+    /// The setting to save, and its value, for choosing `name` for the given
+    /// mode. `own` chooses that mode's own setting; otherwise it is used when
+    /// already set, and `theme` changes: a pair's half for the mode, or a
+    /// single theme for both modes. A pair naming one theme twice collapses.
+    pub fn theme_choice(&self, dark: bool, name: &str, own: bool) -> Result<(ThemeKey, String)> {
+        let key = ThemeKey::mode(dark);
+        if own || self.theme_setting(key).is_some() {
+            return Ok((key, name.to_owned()));
+        }
+        let names = ThemeNames::parse(&self.theme)?;
+        if !names.paired {
+            return Ok((ThemeKey::Theme, name.to_owned()));
+        }
+        let (light, dark) = if dark {
+            (names.light, name)
+        } else {
+            (name, names.dark)
+        };
+        let value = if light == dark {
+            name.to_owned()
+        } else {
+            format!("light:{light},dark:{dark}")
+        };
+        Ok((ThemeKey::Theme, value))
+    }
+
+    /// The value one theme setting holds, when set.
+    pub fn theme_setting(&self, key: ThemeKey) -> Option<&str> {
+        match key {
+            ThemeKey::Theme => Some(&self.theme),
+            ThemeKey::Light => self.light_theme.as_deref(),
+            ThemeKey::Dark => self.dark_theme.as_deref(),
+        }
+    }
+
+    /// Sets one theme setting.
+    pub fn set_theme(&mut self, key: ThemeKey, name: &str) {
+        match key {
+            ThemeKey::Theme => self.theme = name.to_owned(),
+            ThemeKey::Light => self.light_theme = Some(name.to_owned()),
+            ThemeKey::Dark => self.dark_theme = Some(name.to_owned()),
+        }
+    }
+
+    fn themes_with_directories(
+        &self,
+        directories: impl Fn() -> Result<Vec<PathBuf>>,
+    ) -> Result<Themes> {
+        let names = self.theme_names()?;
+        let dark = Self::named_theme(names.dark, &directories)?;
+        let light = if names.light == names.dark {
+            dark.clone()
+        } else {
+            Self::named_theme(names.light, &directories)?
+        };
+        Ok(Themes { light, dark })
     }
 
     fn theme_with_directories(
         &self,
         directories: impl FnOnce() -> Result<Vec<PathBuf>>,
     ) -> Result<Theme> {
-        let name = self.theme.trim();
+        Self::named_theme(&self.theme, directories)
+    }
+
+    fn named_theme(
+        name: &str,
+        directories: impl FnOnce() -> Result<Vec<PathBuf>>,
+    ) -> Result<Theme> {
+        let name = name.trim();
         if let Some(theme) = Theme::builtin(name) {
             return Ok(theme);
         }
@@ -1263,6 +1458,109 @@ fn write_config(path: &Path, text: &str) -> Result<()> {
         Ok(())
     })();
     result.map_err(|error| Error::from(error).at_path(path))
+}
+
+/// One of the settings that choose a theme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeKey {
+    /// `theme`: one theme, or a light/dark pair.
+    Theme,
+    /// `light_theme`: the light mode's own theme.
+    Light,
+    /// `dark_theme`: the dark mode's own theme.
+    Dark,
+}
+
+impl ThemeKey {
+    /// The given mode's own setting.
+    pub const fn mode(dark: bool) -> Self {
+        if dark { Self::Dark } else { Self::Light }
+    }
+
+    /// The config key.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Theme => "theme",
+            Self::Light => "light_theme",
+            Self::Dark => "dark_theme",
+        }
+    }
+}
+
+/// The theme names each mode uses: `theme`'s one name for both, or a pair in
+/// Ghostty's syntax, `light:Catppuccin Latte,dark:Catppuccin Mocha`, with
+/// `light_theme` and `dark_theme` overriding either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThemeNames<'a> {
+    pub light: &'a str,
+    pub dark: &'a str,
+    /// Whether the value names the modes separately, even the same theme.
+    pub paired: bool,
+}
+
+impl<'a> ThemeNames<'a> {
+    fn parse(value: &'a str) -> Result<Self> {
+        let value = value.trim();
+        if !value.starts_with("light:") && !value.starts_with("dark:") {
+            return Ok(Self {
+                light: value,
+                dark: value,
+                paired: false,
+            });
+        }
+        let (mut light, mut dark) = (None, None);
+        for part in value.split(',') {
+            let part = part.trim();
+            let (slot, name) = if let Some(name) = part.strip_prefix("light:") {
+                (&mut light, name)
+            } else if let Some(name) = part.strip_prefix("dark:") {
+                (&mut dark, name)
+            } else {
+                return Err(Error::InvalidThemePair);
+            };
+            let name = name.trim();
+            if name.is_empty() || slot.replace(name).is_some() {
+                return Err(Error::InvalidThemePair);
+            }
+        }
+        let (Some(light), Some(dark)) = (light, dark) else {
+            return Err(Error::InvalidThemePair);
+        };
+        Ok(Self {
+            light,
+            dark,
+            paired: true,
+        })
+    }
+
+    /// The name the given mode uses.
+    pub fn pick(self, dark: bool) -> &'a str {
+        if dark { self.dark } else { self.light }
+    }
+}
+
+/// The resolved theme for each mode; both are the same theme unless `theme`
+/// pairs two.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Themes {
+    pub light: Theme,
+    pub dark: Theme,
+}
+
+impl Themes {
+    /// One theme for both modes.
+    #[cfg(test)]
+    pub fn single(theme: Theme) -> Self {
+        Self {
+            light: theme.clone(),
+            dark: theme,
+        }
+    }
+
+    /// The theme the given mode shows.
+    pub fn pick(&self, dark: bool) -> &Theme {
+        if dark { &self.dark } else { &self.light }
+    }
 }
 
 /// Colors are packed 24-bit RGB, without an alpha channel.
@@ -1476,6 +1774,22 @@ mod tests {
     use super::*;
     use anyhow::Context as _;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Usage settings written for providers since removed, or for the
+    /// retired browser cookie import, must not stop the config loading.
+    #[test]
+    fn usage_settings_for_removed_providers_still_load() -> anyhow::Result<()> {
+        let config = Config::parse(
+            "[usage]\nshow_providers = [\"cursor\"]\nhide_providers = [\"gemini\"]\n\
+             browser_cookies = true\n[usage.providers.openrouter]\napi_key = \"x\"\n",
+        )?;
+        assert_eq!(config.usage.show_providers, ["cursor"]);
+        assert!(matches!(
+            Config::parse("[usage.providers.grok]\ncookie = \"x\"\n"),
+            Err(Error::UnknownUsageSetting { .. })
+        ));
+        Ok(())
+    }
 
     /// The daemon's own answer is the starting point, each GUI key overrides
     /// it alone, and the file this GUI writes for a new user pins neither.
@@ -2020,7 +2334,7 @@ mod tests {
         // a setting this version does not understand.
         let original = "# heading\ntheme = 'Default' # selection\nfuture = true\n\n[tabs] # fonts\nsize = 19 # keep\n\n[github] # public only\noauth_client_id = 'Iv1.fixture' # keep ID\n";
         fs::write(&path, original)?;
-        config.save_theme_path("Nord", &path)?;
+        config.save_theme_path(ThemeKey::Theme, "Nord", &path)?;
         assert_eq!(
             fs::read_to_string(&path)?,
             original.replace("'Default'", "\"Nord\"")
@@ -2032,7 +2346,7 @@ mod tests {
             &path,
             "# no theme\n[tabs]\nsize = 19\n[github]\noauth_client_id = 'Iv1.fixture'\n",
         )?;
-        config.save_theme_path("Dracula", &path)?;
+        config.save_theme_path(ThemeKey::Theme, "Dracula", &path)?;
         let saved = fs::read_to_string(&path)?;
         let parsed = Config::parse(&saved)?;
         assert_eq!(parsed.theme, "Dracula");
@@ -2046,6 +2360,185 @@ mod tests {
     }
 
     #[test]
+    fn a_theme_pair_names_one_theme_per_mode() -> anyhow::Result<()> {
+        let names = |value: &str| {
+            Config {
+                theme: value.into(),
+                ..Config::default()
+            }
+            .theme_names()
+            .map(|names| (names.light.to_owned(), names.dark.to_owned(), names.paired))
+        };
+        let own = |light: &str, dark: &str, paired| (light.to_owned(), dark.to_owned(), paired);
+        assert_eq!(names("Nord")?, own("Nord", "Nord", false));
+        assert_eq!(
+            names("  ~/my theme ")?,
+            own("~/my theme", "~/my theme", false)
+        );
+        // Either order, with Ghostty's spacing and names that hold spaces.
+        for value in [
+            "light:Catppuccin Latte,dark:Catppuccin Mocha",
+            "dark: Catppuccin Mocha , light: Catppuccin Latte",
+        ] {
+            assert_eq!(
+                names(value)?,
+                own("Catppuccin Latte", "Catppuccin Mocha", true)
+            );
+        }
+        assert_eq!(names("light:Nord,dark:Nord")?, own("Nord", "Nord", true));
+        for value in [
+            "light:Nord",
+            "dark:Nord,dark:Dracula",
+            "light:,dark:Nord",
+            "light:Nord,dark:Dracula,Default",
+            "light:Nord;dark:Dracula",
+        ] {
+            assert!(
+                matches!(names(value), Err(Error::InvalidThemePair)),
+                "{value}"
+            );
+            // A malformed pair is rejected when the config loads, too.
+            assert!(
+                Config::parse(&format!("theme = '{value}'")).is_err(),
+                "{value}"
+            );
+        }
+        let themes = Config::parse("theme = 'light:Catppuccin Latte,dark:Nord'")?.themes()?;
+        assert_eq!(
+            Some(themes.light.clone()),
+            Theme::builtin("Catppuccin Latte")
+        );
+        assert_eq!(Some(themes.dark.clone()), Theme::builtin("Nord"));
+        assert_eq!(themes.pick(false), &themes.light);
+        assert_eq!(themes.pick(true), &themes.dark);
+        assert_eq!(
+            Config::parse("theme = 'Nord'")?.themes()?,
+            Themes::single(Theme::builtin("Nord").context("builtin")?)
+        );
+        // An unknown half fails the whole pair.
+        assert!(
+            Config::parse("theme = 'light:Nord,dark:../nope'")?
+                .themes()
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn light_and_dark_themes_are_set_individually() -> anyhow::Result<()> {
+        // Each overrides its half of `theme`, single or paired.
+        let config = Config::parse("theme = 'Nord'\nlight_theme = 'Catppuccin Latte'")?;
+        let names = config.theme_names()?;
+        assert_eq!((names.light, names.dark), ("Catppuccin Latte", "Nord"));
+        let themes = config.themes()?;
+        assert_eq!(Some(themes.light), Theme::builtin("Catppuccin Latte"));
+        assert_eq!(Some(themes.dark), Theme::builtin("Nord"));
+        let config = Config::parse("theme = 'light:Default,dark:Nord'\ndark_theme = ' Dracula '")?;
+        let names = config.theme_names()?;
+        assert_eq!((names.light, names.dark), ("Default", "Dracula"));
+        // They layer over the managed file like any key, and empty ones fail.
+        let merged = Config::parse_layers(
+            [DEFAULT_CONFIG, "dark_theme = 'Catppuccin Mocha'"],
+            ClipboardToast::default(),
+        )?;
+        assert_eq!(merged.theme_names()?.dark, "Catppuccin Mocha");
+        assert_eq!(merged.theme_names()?.light, "Default");
+        for text in ["light_theme = ''", "dark_theme = '  '"] {
+            assert!(
+                matches!(Config::parse(text), Err(Error::EmptyTheme)),
+                "{text}"
+            );
+        }
+        // Saving one writes only its key, keeping `theme` and comments, and
+        // validates the theme first.
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        fs::write(
+            &path,
+            "# mine\ntheme = 'Nord' # both\n\n[layout]\nmode = 'orca'\n",
+        )?;
+        let config = Config::parse(&fs::read_to_string(&path)?)?;
+        config.save_theme_path(ThemeKey::Light, "Catppuccin Latte", &path)?;
+        config.save_theme_path(ThemeKey::Dark, "Dracula", &path)?;
+        let text = fs::read_to_string(&path)?;
+        assert!(text.contains("# mine") && text.contains("# both"), "{text}");
+        let saved = Config::parse(&text)?;
+        assert_eq!(saved.theme, "Nord");
+        assert_eq!(saved.light_theme.as_deref(), Some("Catppuccin Latte"));
+        assert_eq!(saved.dark_theme.as_deref(), Some("Dracula"));
+        assert_eq!(saved.layout.mode, LayoutMode::Orca);
+        for name in ["", "../nope"] {
+            assert!(config.save_theme_path(ThemeKey::Dark, name, &path).is_err());
+        }
+        assert_eq!(fs::read_to_string(&path)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn choosing_a_theme_replaces_only_the_current_modes_half() -> anyhow::Result<()> {
+        let theme = |value: &str| (ThemeKey::Theme, value.to_owned());
+        let pair = Config::parse("theme = 'light:Catppuccin Latte,dark:Nord'")?;
+        assert_eq!(
+            pair.theme_choice(true, "Dracula", false)?,
+            theme("light:Catppuccin Latte,dark:Dracula")
+        );
+        assert_eq!(
+            pair.theme_choice(false, "Default", false)?,
+            theme("light:Default,dark:Nord")
+        );
+        // Choosing the other half's theme leaves one name.
+        assert_eq!(
+            pair.theme_choice(true, "Catppuccin Latte", false)?,
+            theme("Catppuccin Latte")
+        );
+        let single = Config::parse("theme = 'Nord'")?;
+        for dark in [false, true] {
+            assert_eq!(
+                single.theme_choice(dark, "Dracula", false)?,
+                theme("Dracula")
+            );
+            // A mode's own choice goes to its own setting.
+            assert_eq!(
+                single.theme_choice(dark, "Dracula", true)?,
+                (ThemeKey::mode(dark), "Dracula".to_owned())
+            );
+        }
+        // Once a mode has its own setting, choosing for it keeps using it.
+        let own = Config::parse("theme = 'Nord'\ndark_theme = 'Dracula'")?;
+        assert_eq!(
+            own.theme_choice(true, "Default", false)?,
+            (ThemeKey::Dark, "Default".to_owned())
+        );
+        assert_eq!(own.theme_choice(false, "Default", false)?, theme("Default"));
+        // The saved pair round-trips and is validated whole.
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let (key, value) = pair.theme_choice(true, "Dracula", false)?;
+        pair.save_theme_path(key, &value, &path)?;
+        let saved = Config::parse(&fs::read_to_string(&path)?)?.themes()?;
+        assert_eq!(Some(saved.dark), Theme::builtin("Dracula"));
+        assert_eq!(Some(saved.light), Theme::builtin("Catppuccin Latte"));
+        let before = fs::read_to_string(&path)?;
+        assert!(
+            pair.save_theme_path(ThemeKey::Theme, "light:Nord,dark:../nope", &path)
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&path)?, before);
+        // A path half is still offered by the picker.
+        let custom = temp.0.join("custom");
+        fs::write(&custom, "background=112233")?;
+        let custom = custom.to_str().context("non-UTF8 temporary path")?;
+        let config = Config::parse(&format!("theme = 'light:{custom},dark:Nord'"))?;
+        assert_eq!(config.themes()?.light.background, 0x112233);
+        assert!(
+            config
+                .available_themes_in(&[])?
+                .contains(&custom.to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn save_validates_theme_and_toml_before_writing() -> anyhow::Result<()> {
         let temp = TempDirectory::new()?;
         let path = temp.0.join("config.toml");
@@ -2054,18 +2547,26 @@ mod tests {
         fs::write(&custom, "background=invalid")?;
         let custom_name = custom.to_str().context("non-UTF8 temporary path")?;
         for name in ["", "../invalid", custom_name] {
-            assert!(config.save_theme_path(name, &path).is_err());
+            assert!(
+                config
+                    .save_theme_path(ThemeKey::Theme, name, &path)
+                    .is_err()
+            );
             assert!(!path.exists());
         }
         for text in ["theme = [", "theme = 'Nord'\ntheme = 'Dracula'\n"] {
             fs::write(&path, text)?;
-            assert!(config.save_theme_path("Nord", &path).is_err());
+            assert!(
+                config
+                    .save_theme_path(ThemeKey::Theme, "Nord", &path)
+                    .is_err()
+            );
             assert_eq!(fs::read_to_string(&path)?, text);
             assert_eq!(fs::read_dir(&temp.0)?.count(), 2);
         }
         fs::write(&custom, "background=112233")?;
         let new_path = temp.0.join("nested/config.toml");
-        config.save_theme_path(custom_name, &new_path)?;
+        config.save_theme_path(ThemeKey::Theme, custom_name, &new_path)?;
         assert_eq!(
             Config::parse(&fs::read_to_string(&new_path)?)?
                 .theme()?
@@ -2263,6 +2764,74 @@ mod tests {
             Config::save_layout_path(LayoutMode::Minimal, &path)?;
             assert_eq!(mode(&path)?.mode, LayoutMode::Minimal, "{original}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn appearance_follows_the_system_unless_forced() -> anyhow::Result<()> {
+        for config in [
+            Config::default(),
+            Config::parse("")?,
+            Config::parse(DEFAULT_CONFIG)?,
+        ] {
+            assert_eq!(config.appearance, Appearance::System);
+        }
+        for appearance in Appearance::ALL {
+            let parsed = Config::parse(&format!("appearance = '{appearance}'"))?;
+            assert_eq!(parsed.appearance, appearance);
+        }
+        assert!(Config::parse("appearance = 'dim'").is_err());
+        assert!(Appearance::System.is_dark(|| true));
+        assert!(!Appearance::System.is_dark(|| false));
+        // A forced choice never consults the system.
+        assert!(!Appearance::Light.is_dark(|| unreachable!()));
+        assert!(Appearance::Dark.is_dark(|| unreachable!()));
+        Ok(())
+    }
+
+    #[test]
+    fn saving_an_appearance_keeps_every_other_setting() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.local.toml");
+        let saved = |path: &Path| -> anyhow::Result<Config> {
+            Ok(Config::parse(&fs::read_to_string(path)?)?)
+        };
+        // A new install starts from the local template and keeps its layout.
+        Config::save_appearance_path(Appearance::Light, &path)?;
+        let text = fs::read_to_string(&path)?;
+        assert!(text.contains("appearance = \"light\""), "{text}");
+        assert!(text.contains("# New installs start"), "{text}");
+        let merged =
+            Config::parse_layers([DEFAULT_CONFIG, text.as_str()], ClipboardToast::default())?;
+        assert_eq!(merged.appearance, Appearance::Light);
+        assert_eq!(merged.layout.mode, Config::parse(LOCAL_CONFIG)?.layout.mode);
+        // An existing value is replaced in place, keeping its comment, and a
+        // file with tables still parses.
+        fs::write(
+            &path,
+            "# mine\ntheme = 'Nord'\nappearance = 'dark' # forced\n\n[layout]\nmode = 'orca'\n",
+        )?;
+        for chosen in Appearance::ALL {
+            Config::save_appearance_path(chosen, &path)?;
+            let config = saved(&path)?;
+            assert_eq!(config.appearance, chosen);
+            assert_eq!(config.theme, "Nord");
+            assert_eq!(config.layout.mode, LayoutMode::Orca);
+        }
+        let text = fs::read_to_string(&path)?;
+        assert!(
+            text.contains("# mine") && text.contains("# forced"),
+            "{text}"
+        );
+        assert_eq!(text.matches("appearance").count(), 1, "{text}");
+        // A file with only tables gains a top-level key, not a table entry.
+        fs::write(&path, "[layout]\nmode = 'orca'\n")?;
+        Config::save_appearance_path(Appearance::Dark, &path)?;
+        let config = saved(&path)?;
+        assert_eq!(
+            (config.appearance, config.layout.mode),
+            (Appearance::Dark, LayoutMode::Orca)
+        );
         Ok(())
     }
 
@@ -2706,7 +3275,7 @@ mod tests {
         let daemon = temp.0.join("absent.toml");
         let legacy = "# user fonts\n[terminal]\nsize = 19 # keep\n";
         fs::write(&path, legacy)?;
-        Config::default().save_theme_at("Nord", &path)?;
+        Config::default().save_theme_at(ThemeKey::Theme, "Nord", &path)?;
         assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
         let local = fs::read_to_string(path.with_extension("local.toml"))?;
         assert!(local.contains("# user fonts"));

@@ -393,6 +393,7 @@ impl HerdrWindow {
         self.marked.clear();
         self.wheel = Default::default();
         self.sent_focus = None;
+        self.sent_host_theme = None;
         self.activation_deadline = None;
         self.pending_navigation = None;
     }

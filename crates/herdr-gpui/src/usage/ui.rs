@@ -1,9 +1,9 @@
 //! The pieces a provider's panel is drawn from, in the window's theme: a
-//! limit with its bar and pace, balances, facts, and shares. [`Ui::standard`]
-//! lays out a report's shared fields; a provider's own `render` may compose
-//! the same pieces around its detail.
+//! limit with its bar and pace, facts, and shares. [`Ui::standard`] lays out
+//! a report's fields; a provider's own `render` may compose the same pieces
+//! differently.
 
-use super::model::{Balance, Pace, Report, Section, Severity, Window as Limit, countdown};
+use super::model::{Pace, Report, Section, Severity, Window as Limit, countdown};
 use crate::config::Theme;
 use gpui::{prelude::*, *};
 use std::time::SystemTime;
@@ -23,19 +23,13 @@ impl Ui {
         rgb(self.theme.muted)
     }
 
-    /// Windows, then balances, then sections, each group ruled off.
+    /// Windows, then sections, each group ruled off.
     pub fn standard(&self, report: &Report) -> AnyElement {
         let mut body = div()
             .flex()
             .flex_col()
             .children(report.windows.iter().map(|limit| self.limit(limit)));
         let mut drawn = !report.windows.is_empty();
-        if !report.balances.is_empty() {
-            body = body
-                .when(drawn, |body| body.child(self.rule()))
-                .child(self.balances(&report.balances));
-            drawn = true;
-        }
         for section in &report.sections {
             body = body
                 .when(drawn, |body| body.child(self.rule()))
@@ -83,37 +77,6 @@ impl Ui {
                     .text_size(self.small())
                     .text_color(self.muted())
                     .child(pace.describe(limit.used))
-            }))
-            .into_any_element()
-    }
-
-    /// One row per balance; one with a total gets a bar of what is left.
-    pub fn balances(&self, balances: &[Balance]) -> AnyElement {
-        self.block()
-            .children(balances.iter().map(|balance| {
-                let row = div()
-                    .flex()
-                    .justify_between()
-                    .gap(px(8.))
-                    .child(div().text_color(self.muted()).child(balance.label.clone()))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(balance.text()),
-                    );
-                match balance.total.filter(|total| *total > 0.) {
-                    Some(total) => {
-                        let left = (balance.amount / total * 100.).clamp(0., 100.) as f32;
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .child(row)
-                            .child(self.bar(left, 100. - left, None))
-                            .into_any_element()
-                    }
-                    None => row.into_any_element(),
-                }
             }))
             .into_any_element()
     }
