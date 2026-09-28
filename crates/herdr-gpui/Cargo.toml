@@ -11,9 +11,7 @@ workspace = true
 
 [dependencies]
 url.workspace = true
-aes.workspace                  = true
 anyhow.workspace               = true
-cbc.workspace                  = true
 chrono.workspace               = true
 config_loader.workspace        = true
 ed25519-dalek.workspace        = true
@@ -24,14 +22,11 @@ gpui.workspace                 = true
 gpui_platform                  = { features = ["font-kit", "runtime_shaders", "wayland", "x11"], workspace = true }
 herdr-client.workspace         = true
 image                          = { features = ["bmp", "tiff"], workspace = true }
-pbkdf2.workspace               = true
 percent-encoding.workspace     = true
 rodio.workspace                = true
-rusqlite.workspace             = true
 secrecy.workspace              = true
 serde.workspace                = true
 serde_json.workspace           = true
-sha1.workspace                 = true
 sha2.workspace                 = true
 tar.workspace                  = true
 tempfile.workspace             = true

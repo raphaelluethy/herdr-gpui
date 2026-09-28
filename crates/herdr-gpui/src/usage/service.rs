@@ -16,8 +16,7 @@ use std::time::{Duration, SystemTime};
 pub(crate) struct Setting {
     pub name: &'static str,
     pub env: &'static [&'static str],
-    /// What the value is and where to find it, e.g. which cookie to copy
-    /// from which site's developer tools.
+    /// What the value is and where to find it.
     pub help: &'static str,
 }
 
@@ -90,8 +89,7 @@ pub(crate) trait Service: Sync {
     /// the probed host has no sign-in and the config names none, so the
     /// provider is left out unless the config asks for it.
     fn fetch(&self, probe: &mut Probe) -> Option<Result<Report>>;
-    /// The panel body. The default draws the shared fields; a provider with
-    /// its own detail draws that too, from [`Report::detail`].
+    /// The panel body. The default draws the report's windows and sections.
     fn render(&self, report: &Report, ui: &Ui, _cx: &App) -> AnyElement {
         ui.standard(report)
     }
@@ -99,6 +97,11 @@ pub(crate) trait Service: Sync {
 
 pub(super) fn json<'a, T: Deserialize<'a>>(body: &'a str) -> Result<T> {
     serde_json::from_str(body).map_err(|error| Error::UsageJson(error.classify()))
+}
+
+/// A response that parsed but does not hold what the service documents.
+pub(super) fn invalid() -> Error {
+    Error::UsageJson(serde_json::error::Category::Data)
 }
 
 /// Seconds, milliseconds, or RFC 3339, as services variously send times.
@@ -141,22 +144,4 @@ impl Timestamp {
             }
         }
     }
-}
-
-/// Deserializes a number that a service may send as a string.
-pub(crate) fn number<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Option<f64>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Loose {
-        Number(f64),
-        Text(String),
-        Null,
-    }
-    Ok(match Option::<Loose>::deserialize(deserializer)? {
-        Some(Loose::Number(value)) => Some(value),
-        Some(Loose::Text(text)) => text.trim().parse().ok(),
-        Some(Loose::Null) | None => None,
-    })
 }
