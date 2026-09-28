@@ -322,16 +322,21 @@ Windows, where the app draws its own frame from the theme.
 
 To have the app's own colors switch too, choose a theme for each mode under
 **Light theme** and **Dark theme** in Preferences; the mode on screen is marked.
-Choosing a different theme for one mode pairs them, saved in Ghostty's syntax:
+Each saves its own setting, which you can also write by hand:
 
 ```toml
-theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"
+light_theme = "Catppuccin Latte"
+dark_theme = "Catppuccin Mocha"
 ```
 
+Either one overrides what `theme` names for that mode, so setting only one
+leaves the other on `theme`. `theme` also accepts Ghostty's pair syntax,
+`theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"`.
+
 Every window shows the current mode's theme and swaps when the mode changes,
-whether forced or following the system. The Themes command picks the
-theme on screen: the current mode's half of a pair, or a single theme for both
-modes. Choosing the same theme for both collapses the pair to one name.
+whether forced or following the system. The Themes command picks the theme on
+screen: the current mode's own setting when it has one, else `theme` (the
+current mode's half of a pair, or a single theme for both modes).
 
 Choose the sidebar layout from **View > Layout**, which lists every layout,
 checks the one in use, switches at once, and saves the choice to

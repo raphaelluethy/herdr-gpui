@@ -1,6 +1,6 @@
 use crate::{
     HerdrWindow,
-    config::{Theme, Themes},
+    config::{Theme, ThemeKey},
     menu::Page,
     search_input::SearchInput,
 };
@@ -12,14 +12,14 @@ pub(crate) enum ThemeTarget {
     /// The theme on screen: the current mode's half of a pair, or the single
     /// theme, which choosing replaces for both modes.
     Current,
-    /// One mode's theme. Choosing it for a single theme pairs the two, so the
-    /// other mode keeps what it had.
+    /// One mode's own setting, `light_theme` or `dark_theme`, so the other
+    /// mode keeps what it had.
     Mode { dark: bool },
 }
 
 impl ThemeTarget {
     /// The mode this chooses for, given whether the app is dark, and whether
-    /// choosing splits a single theme into a pair.
+    /// it saves that mode's own setting.
     fn mode(self, app_dark: bool) -> (bool, bool) {
         match self {
             Self::Current => (app_dark, false),
@@ -45,8 +45,8 @@ pub(super) struct ThemePicker {
     loaded: Option<String>,
     accepting: bool,
     saving: bool,
-    /// The `theme` value being saved, and the mode it was chosen in.
-    saving_as: Option<(String, bool)>,
+    /// The theme setting being saved, and its value.
+    saving_as: Option<(ThemeKey, String)>,
     // Keep the slot across dismiss/reopen: blocking I/O cannot be cancelled by
     // dropping a GPUI task. Only its completion may release the slot.
     in_flight: Option<(u64, u64)>,
@@ -368,12 +368,13 @@ impl HerdrWindow {
         picker.saving = saving;
         picker.in_flight = Some(token);
         let window = picker.window;
-        let (dark, split) = picker.target.mode(self.dark);
-        let value = if saving {
-            // A pair keeps the other mode's theme.
-            let value = self.config.theme_choosing(dark, &name, split);
-            picker.saving_as = value.as_ref().ok().map(|value| (value.clone(), dark));
-            Some(value)
+        let (dark, own) = picker.target.mode(self.dark);
+        let choice = if saving {
+            // Recorded now, so a mode switch while the save runs still
+            // updates the setting that was chosen.
+            let choice = self.config.theme_choice(dark, &name, own);
+            picker.saving_as = choice.as_ref().ok().cloned();
+            Some(choice)
         } else {
             None
         };
@@ -381,8 +382,11 @@ impl HerdrWindow {
         config.theme = name;
         let theme = self.theme.clone();
         let task = cx.background_executor().spawn(async move {
-            match value {
-                Some(value) => config.save_theme(&value?).map(|()| theme),
+            match choice {
+                Some(choice) => {
+                    let (key, value) = choice?;
+                    config.save_theme(key, &value).map(|()| theme)
+                }
                 None => config.theme(),
             }
         });
@@ -426,21 +430,25 @@ impl HerdrWindow {
                     input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx)
                 });
                 if saving {
-                    // Recorded when the save began, so a mode switch while it
-                    // ran still updates the half that was chosen.
-                    let (dark, split) = picker.target.mode(self.dark);
-                    let saved_as = saved_as.or_else(|| {
-                        let name = picker.desired.as_ref()?;
-                        let value = self.config.theme_choosing(dark, name, split).ok()?;
-                        Some((value, dark))
-                    });
-                    if let Some((value, dark)) = saved_as {
-                        self.config.theme = value;
-                        let paired = self.config.theme_names().is_ok_and(|names| names.paired);
-                        match (paired, dark) {
-                            (false, _) => self.themes = Themes::single(self.theme.clone()),
-                            (true, true) => self.themes.dark = self.theme.clone(),
-                            (true, false) => self.themes.light = self.theme.clone(),
+                    let (dark, own) = picker.target.mode(self.dark);
+                    let name = picker.desired.clone().unwrap_or_default();
+                    let saved_as =
+                        saved_as.or_else(|| self.config.theme_choice(dark, &name, own).ok());
+                    if let Some((key, value)) = saved_as {
+                        self.config.set_theme(key, &value);
+                        // Every mode now naming the chosen theme shows it; the
+                        // other keeps its own.
+                        if let Ok(names) = self.config.theme_names() {
+                            for mode in [false, true] {
+                                if names.pick(mode) == name.trim() {
+                                    let side = if mode {
+                                        &mut self.themes.dark
+                                    } else {
+                                        &mut self.themes.light
+                                    };
+                                    *side = self.theme.clone();
+                                }
+                            }
                         }
                         // Choosing the other mode's theme leaves this one's on screen.
                         self.theme = self.themes.pick(self.dark).clone();
@@ -666,6 +674,7 @@ impl HerdrWindow {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use crate::config::Themes;
     use core::prelude::v1::test;
 
     #[gpui::test]
@@ -1184,11 +1193,11 @@ mod tests {
         });
     }
 
-    /// Choosing a theme for the mode not on screen pairs it with the single
-    /// theme and leaves the screen on the current mode's theme; choosing the
-    /// same theme again for that mode collapses the pair.
+    /// Choosing a theme for one mode saves that mode's own setting, leaving
+    /// `theme` and the other mode alone, and the screen on the current mode's
+    /// theme. The Themes command then keeps using a mode's own setting.
     #[gpui::test]
-    fn picking_for_one_mode_pairs_a_single_theme(cx: &mut TestAppContext) {
+    fn picking_for_one_mode_sets_its_own_theme(cx: &mut TestAppContext) {
         let latte = Theme::builtin("Catppuccin Latte").unwrap();
         let nord = Theme::builtin("Nord").unwrap();
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
@@ -1222,7 +1231,9 @@ mod tests {
 
                 let light = ThemeTarget::Mode { dark: false };
                 accept(view, light, "Catppuccin Latte", &latte, window, cx);
-                assert_eq!(view.config.theme, "light:Catppuccin Latte,dark:Nord");
+                assert_eq!(view.config.theme, "Nord");
+                assert_eq!(view.config.light_theme.as_deref(), Some("Catppuccin Latte"));
+                assert_eq!(view.config.dark_theme, None);
                 assert_eq!(view.themes.light, latte);
                 assert_eq!(view.themes.dark, nord);
                 // Dark mode is on screen, so its theme stays.
@@ -1230,9 +1241,24 @@ mod tests {
                 assert_eq!(view.theme_name_for(false), "Catppuccin Latte");
                 assert_eq!(view.theme_name_for(true), "Nord");
 
-                accept(view, light, "Nord", &nord, window, cx);
-                assert_eq!(view.config.theme, "Nord");
-                assert_eq!(view.themes, Themes::single(nord.clone()));
+                // The Themes command in dark mode changes `theme`, which
+                // light mode no longer follows.
+                let dracula = Theme::builtin("Dracula").unwrap();
+                accept(view, ThemeTarget::Current, "Dracula", &dracula, window, cx);
+                assert_eq!(view.config.theme, "Dracula");
+                assert_eq!(view.config.light_theme.as_deref(), Some("Catppuccin Latte"));
+                assert_eq!(view.themes.light, latte);
+                assert_eq!(view.themes.dark, dracula);
+                assert_eq!(view.theme, dracula);
+
+                // In light mode, the command keeps light mode's own setting.
+                view.dark = false;
+                view.theme = latte.clone();
+                accept(view, ThemeTarget::Current, "Nord", &nord, window, cx);
+                assert_eq!(view.config.light_theme.as_deref(), Some("Nord"));
+                assert_eq!(view.config.theme, "Dracula");
+                assert_eq!(view.themes.light, nord);
+                assert_eq!(view.themes.dark, dracula);
                 assert_eq!(view.theme, nord);
             })
         });
