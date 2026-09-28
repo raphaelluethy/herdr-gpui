@@ -1047,6 +1047,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         pending_resize: None,
         active: false,
         sent_focus: None,
+        sent_host_theme: None,
         bounds: Bounds::default(),
         title: crate::WINDOW_TITLE.to_owned(),
         cell_width: 9.,
@@ -1745,6 +1746,18 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
     let footer = cx.debug_bounds("preferences-footer").unwrap();
     let body = cx.debug_bounds("preferences-body").unwrap();
     let theme_row = cx.debug_bounds("preferences-theme").unwrap();
+    // The appearance choices wrap inside the narrow panel rather than
+    // spilling past it, and sit above the theme they do not pick.
+    let appearance = cx.debug_bounds("preferences-appearance").unwrap();
+    assert!(appearance.bottom() <= theme_row.top() + px(1.));
+    for id in [
+        "preferences-appearance-system",
+        "preferences-appearance-light",
+        "preferences-appearance-dark",
+    ] {
+        let option = cx.debug_bounds(id).unwrap();
+        assert!(option.left() >= body.left() && option.right() <= body.right());
+    }
     assert!(body.size.height > px(0.));
     assert!(header.bottom() <= body.top());
     assert!(body.bottom() <= footer.top());

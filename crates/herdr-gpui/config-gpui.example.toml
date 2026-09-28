@@ -16,6 +16,13 @@
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path.
 theme = "Default"
+# Light or dark mode for the app and for the programs in its terminals:
+# "system" follows the operating system; "light" or "dark" overrides it. Apps
+# that ask the terminal which mode it is in, such as shell prompts, editors,
+# and agents, get this answer along with the theme's colors. It does not pick
+# the theme: choose a light or dark one above to match. View > Appearance
+# switches it. The native window frame follows it on macOS only.
+appearance = "system"
 
 # Ask before closing a tab (closing terminates its terminal processes).
 # Pane close confirmation is independent and remains enabled.

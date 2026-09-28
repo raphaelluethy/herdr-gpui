@@ -1,6 +1,6 @@
 use crate::{
     HerdrWindow,
-    config::{Config, FONT_SIZE_RANGE, Features, FontFace},
+    config::{Appearance, Config, FONT_SIZE_RANGE, Features, FontFace},
     font_picker::{FontTarget, shared_family},
     fonts::StyledFont,
     search_input::SearchInput,
@@ -77,6 +77,70 @@ impl HerdrWindow {
             self.set_font_size(editor.face, size, cx);
         }
         cx.notify();
+    }
+
+    /// Light, dark, or the system's mode, for the app and its terminals. The
+    /// choice in effect is filled; the others switch to themselves.
+    fn render_appearance_choice(&self, cx: &mut Context<Self>) -> Div {
+        let theme = &self.theme;
+        let current = self.config.appearance;
+        let options = Appearance::ALL.map(|appearance| {
+            let chosen = appearance == current;
+            let fill = if chosen {
+                theme.primary_wash()
+            } else {
+                theme.background
+            };
+            let id = format!("preferences-appearance-{appearance}");
+            div()
+                .id(SharedString::from(id.clone()))
+                .debug_selector(move || id.clone())
+                .flex_none()
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(crate::config::corners::CONTROL))
+                .border_1()
+                .border_color(rgb(theme.active))
+                .bg(rgb(fill))
+                .text_color(rgb(theme.text_on(fill)))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme.active)))
+                .child(match appearance {
+                    Appearance::System => "System",
+                    other => other.label(),
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.set_appearance(appearance, cx);
+                }))
+        });
+        div()
+            .debug_selector(|| "preferences-appearance".into())
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .min_w_0()
+            .gap(px(12.))
+            .py(px(7.))
+            .border_b_1()
+            .border_color(rgb(theme.active))
+            .child(
+                div()
+                    .w(relative(0.3))
+                    .flex_none()
+                    .min_w_0()
+                    .text_color(rgb(theme.muted))
+                    .child("Appearance"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap(px(6.))
+                    .children(options),
+            )
     }
 
     pub(super) fn render_preferences(&self, cx: &mut Context<Self>) -> Div {
@@ -179,6 +243,7 @@ impl HerdrWindow {
                 "Sidebar gap",
                 format!("{} px", self.config.layout.sidebar_gap),
             ))
+            .child(self.render_appearance_choice(cx))
             .child(row("preferences-theme", "Theme", self.config.theme.clone()))
             .child(div().py(px(10.)).child(
                 button("preferences-choose-theme", "Choose theme").on_click(cx.listener(

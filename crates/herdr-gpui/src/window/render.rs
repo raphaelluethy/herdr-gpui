@@ -461,6 +461,11 @@ impl Render for HerdrWindow {
             .on_action(cx.listener(|this, action: &crate::actions::SetLayout, _, cx| {
                 this.set_layout(action.mode, cx);
             }))
+            .on_action(
+                cx.listener(|this, action: &crate::actions::SetAppearance, _, cx| {
+                    this.set_appearance(action.appearance, cx);
+                }),
+            )
             .on_action(cx.listener(|this, action: &RunCommand, window, cx| {
                 this.command(action.command, window, cx);
             }))

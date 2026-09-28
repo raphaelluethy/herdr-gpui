@@ -138,10 +138,15 @@ impl HerdrWindow {
                             theme: theme.clone(),
                             error: None,
                         });
+                        if config.appearance != this.config.appearance {
+                            crate::window::apply_native_appearance(config.appearance, cx);
+                        }
                         if config.keybindings != this.config.keybindings {
                             crate::actions::rebind_keys(cx);
-                        } else if config.layout.mode != this.config.layout.mode {
-                            // The View menu checks the layout in use.
+                        } else if config.layout.mode != this.config.layout.mode
+                            || config.appearance != this.config.appearance
+                        {
+                            // The View menu checks the layout and appearance in use.
                             crate::menus::install(cx);
                         }
                         if !this.config.notifications.enabled && config.notifications.enabled {

@@ -3,10 +3,12 @@
 //! split by responsibility across the submodules below; the fields live here
 //! because every one of them describes this window's own presentation state.
 
+mod appearance;
 mod clipboard;
 mod commands;
 mod file_drop;
 mod flash;
+pub(crate) use appearance::apply_native_appearance;
 pub(crate) use flash::Flash;
 mod image_source;
 mod images;
@@ -83,6 +85,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) pending_resize: Option<(ConnectOptions, std::time::Instant)>,
     pub(crate) active: bool,
     pub(crate) sent_focus: Option<bool>,
+    /// The host theme this window's connection last reported, if it has.
+    pub(crate) sent_host_theme: Option<appearance::ReportedTheme>,
     pub(crate) bounds: Bounds<Pixels>,
     /// Last title pushed to the OS, so the window is renamed only when it changes.
     pub(crate) title: String,
@@ -290,6 +294,7 @@ impl HerdrWindow {
         }
         self.resize();
         self.report_focus();
+        self.report_host_theme(window);
         self.sync_window_title(window);
     }
 
@@ -384,6 +389,7 @@ impl HerdrWindow {
             pending_resize: None,
             active: window.is_window_active(),
             sent_focus: None,
+            sent_host_theme: None,
             bounds: Bounds::default(),
             title: WINDOW_TITLE.to_owned(),
             cell_width: 9.,

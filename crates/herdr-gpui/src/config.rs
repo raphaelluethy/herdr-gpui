@@ -80,6 +80,7 @@ pub(crate) mod corners {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub theme: String,
+    pub appearance: Appearance,
     pub confirm_close_tab: bool,
     pub show_agents: bool,
     /// Plan usage of the selected host's AI services in the status bar.
@@ -107,6 +108,58 @@ pub enum LinkTarget {
     System,
     /// A browser tab in the workspace, where the build can show pages.
     BrowserTab,
+}
+
+/// Whether the app and the programs in its terminals see light or dark mode.
+/// A forced choice overrides the operating system's, for programs that pick
+/// their colors from it, such as shell prompts that ask the terminal.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Appearance {
+    /// Follow the operating system.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    /// Every choice, in the order menus list them.
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    /// The config value that selects it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    /// How menus title it.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::System => "Match System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    /// Whether the app is dark, given whether the operating system is. Asks
+    /// the system only when nothing is forced.
+    pub fn is_dark(self, system_is_dark: impl FnOnce() -> bool) -> bool {
+        match self {
+            Self::System => system_is_dark(),
+            Self::Light => false,
+            Self::Dark => true,
+        }
+    }
+}
+
+impl std::fmt::Display for Appearance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// Whether macOS Option sends Alt shortcuts to a pane or types the character
@@ -576,6 +629,7 @@ impl Default for Config {
         };
         Self {
             theme: "Default".into(),
+            appearance: Appearance::default(),
             github: GitHubConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
@@ -601,6 +655,7 @@ impl Default for Config {
 #[serde(default, deny_unknown_fields)]
 struct Settings {
     theme: Option<String>,
+    appearance: Appearance,
     confirm_close_tab: Option<bool>,
     show_agents: Option<bool>,
     usage: crate::usage::UsageConfig,
@@ -960,6 +1015,7 @@ impl Config {
         config.show_agents = settings.show_agents.unwrap_or(true);
         settings.usage.validate()?;
         config.usage = settings.usage;
+        config.appearance = settings.appearance;
         config.option_as_alt = settings.option_as_alt;
         config.open_links_in = settings.open_links_in;
         for (name, font, settings) in [
@@ -1097,6 +1153,35 @@ impl Config {
                 }
                 _ => {
                     document.insert("layout", toml_edit::value(mode.name()));
+                }
+            }
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
+    /// Persist the appearance choice to the local overrides, keeping the rest.
+    pub fn save_appearance(appearance: Appearance) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_appearance_path(appearance, &local)
+    }
+
+    fn save_appearance_path(appearance: Appearance, path: &Path) -> Result<()> {
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            match document.get_mut("appearance") {
+                Some(toml_edit::Item::Value(value)) => {
+                    let decor = value.decor().clone();
+                    *value = toml_edit::Value::from(appearance.name());
+                    *value.decor_mut() = decor;
+                }
+                _ => {
+                    document.insert("appearance", toml_edit::value(appearance.name()));
                 }
             }
             write_config(path, &document.to_string())
@@ -2279,6 +2364,74 @@ mod tests {
             Config::save_layout_path(LayoutMode::Minimal, &path)?;
             assert_eq!(mode(&path)?.mode, LayoutMode::Minimal, "{original}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn appearance_follows_the_system_unless_forced() -> anyhow::Result<()> {
+        for config in [
+            Config::default(),
+            Config::parse("")?,
+            Config::parse(DEFAULT_CONFIG)?,
+        ] {
+            assert_eq!(config.appearance, Appearance::System);
+        }
+        for appearance in Appearance::ALL {
+            let parsed = Config::parse(&format!("appearance = '{appearance}'"))?;
+            assert_eq!(parsed.appearance, appearance);
+        }
+        assert!(Config::parse("appearance = 'dim'").is_err());
+        assert!(Appearance::System.is_dark(|| true));
+        assert!(!Appearance::System.is_dark(|| false));
+        // A forced choice never consults the system.
+        assert!(!Appearance::Light.is_dark(|| unreachable!()));
+        assert!(Appearance::Dark.is_dark(|| unreachable!()));
+        Ok(())
+    }
+
+    #[test]
+    fn saving_an_appearance_keeps_every_other_setting() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.local.toml");
+        let saved = |path: &Path| -> anyhow::Result<Config> {
+            Ok(Config::parse(&fs::read_to_string(path)?)?)
+        };
+        // A new install starts from the local template and keeps its layout.
+        Config::save_appearance_path(Appearance::Light, &path)?;
+        let text = fs::read_to_string(&path)?;
+        assert!(text.contains("appearance = \"light\""), "{text}");
+        assert!(text.contains("# New installs start"), "{text}");
+        let merged =
+            Config::parse_layers([DEFAULT_CONFIG, text.as_str()], ClipboardToast::default())?;
+        assert_eq!(merged.appearance, Appearance::Light);
+        assert_eq!(merged.layout.mode, Config::parse(LOCAL_CONFIG)?.layout.mode);
+        // An existing value is replaced in place, keeping its comment, and a
+        // file with tables still parses.
+        fs::write(
+            &path,
+            "# mine\ntheme = 'Nord'\nappearance = 'dark' # forced\n\n[layout]\nmode = 'orca'\n",
+        )?;
+        for chosen in Appearance::ALL {
+            Config::save_appearance_path(chosen, &path)?;
+            let config = saved(&path)?;
+            assert_eq!(config.appearance, chosen);
+            assert_eq!(config.theme, "Nord");
+            assert_eq!(config.layout.mode, LayoutMode::Orca);
+        }
+        let text = fs::read_to_string(&path)?;
+        assert!(
+            text.contains("# mine") && text.contains("# forced"),
+            "{text}"
+        );
+        assert_eq!(text.matches("appearance").count(), 1, "{text}");
+        // A file with only tables gains a top-level key, not a table entry.
+        fs::write(&path, "[layout]\nmode = 'orca'\n")?;
+        Config::save_appearance_path(Appearance::Dark, &path)?;
+        let config = saved(&path)?;
+        assert_eq!(
+            (config.appearance, config.layout.mode),
+            (Appearance::Dark, LayoutMode::Orca)
+        );
         Ok(())
     }
 
