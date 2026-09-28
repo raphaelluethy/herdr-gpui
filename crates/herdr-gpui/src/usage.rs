@@ -5,7 +5,6 @@
 //! switching back shows them at once and a failed refresh keeps the numbers it
 //! had, marked stale, rather than blanking them.
 
-mod cookies;
 mod icons;
 mod model;
 mod panel;
@@ -16,7 +15,6 @@ mod render;
 mod service;
 mod settings;
 mod ui;
-mod values;
 
 #[cfg(test)]
 mod tests;
@@ -25,7 +23,6 @@ pub(crate) use model::{Host, Provider};
 pub(crate) use panel::PANEL_WIDTH;
 pub use settings::UsageConfig;
 
-use cookies::CookieJar;
 use model::Report;
 use probe::{Exec, Probe, Shell};
 use std::{
@@ -85,7 +82,7 @@ pub(crate) const HEADLINE: usize = 2;
 impl Entry {
     /// The providers the status bar shows: those with numbers to show, the
     /// ones closest to a limit first, at most `limit` of them. A provider
-    /// that has no report yet, or no windows or balances, waits in the panel.
+    /// that has no report yet, or no windows, waits in the panel.
     pub fn headline(&self, limit: usize) -> Vec<&Reading> {
         let mut shown: Vec<&Reading> = self
             .readings
@@ -116,7 +113,7 @@ fn has_numbers(reading: &Reading) -> bool {
     reading
         .report
         .as_ref()
-        .is_some_and(|report| !report.windows.is_empty() || !report.balances.is_empty())
+        .is_some_and(|report| !report.windows.is_empty())
 }
 
 fn urgency(reading: &Reading) -> f32 {
@@ -354,11 +351,8 @@ fn spawn() -> Option<Worker> {
     let spawned = thread::Builder::new()
         .name("herdr-usage".into())
         .spawn(move || {
-            // Browser cookie keys are kept for the worker's life, so a
-            // browser asks for Keychain access once.
-            let mut cookies = CookieJar::default();
             for (host, config) in incoming {
-                let done = read(&host, &config, &mut cookies, |provider, report| {
+                let done = read(&host, &config, |provider, report| {
                     outgoing
                         .send(Message::Reading(host.clone(), provider, report))
                         .is_ok()
@@ -383,7 +377,6 @@ fn spawn() -> Option<Worker> {
 fn read(
     host: &Host,
     config: &UsageConfig,
-    cookies: &mut CookieJar,
     mut report: impl FnMut(Provider, crate::Result<Report>) -> bool,
 ) -> crate::Result<()> {
     let mut exec = match host {
@@ -395,13 +388,7 @@ fn read(
             continue;
         }
         let requested = config.shown(provider);
-        let mut probe = Probe::new(
-            &mut exec,
-            provider,
-            config.settings(provider),
-            cookies,
-            requested && config.browser_cookies,
-        );
+        let mut probe = Probe::new(&mut exec, provider, config.settings(provider));
         let answer = match provider.service().fetch(&mut probe) {
             Some(answer) => answer,
             None if requested => Err(crate::Error::UsageNotSignedIn),

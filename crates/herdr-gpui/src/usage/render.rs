@@ -191,13 +191,6 @@ impl HerdrWindow {
                     .child(window.label(now)),
             );
         }
-        // A service that meters money or credits rather than a window shows
-        // what is left or spent.
-        if report.windows.is_empty()
-            && let Some(balance) = report.balances.first()
-        {
-            labels = labels.child(balance.amount_text());
-        }
         segment
             .child(labels)
             // The numbers are the last good ones; the panel says why.

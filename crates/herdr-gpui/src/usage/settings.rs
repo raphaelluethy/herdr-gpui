@@ -1,11 +1,11 @@
 //! The `[usage]` config table: whether usage shows at all, which providers to
 //! show although they were not detected or to hide although they were, and
-//! each provider's own settings such as an API key or a session cookie.
+//! each provider's own settings such as a token.
 
 use super::{model::Provider, registry};
 use crate::{Error, Result};
 use secrecy::SecretString;
-use serde::Deserialize;
+use serde::{Deserialize, de::IgnoredAny};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -16,11 +16,11 @@ pub struct UsageConfig {
     pub show_providers: Vec<String>,
     /// Provider ids never shown, even when detected.
     pub hide_providers: Vec<String>,
-    /// Whether providers listed in `show_providers` that sign in with a web
-    /// session may read it from Chrome or Safari. Reading Chrome's cookies
-    /// asks for Keychain access once.
-    pub browser_cookies: bool,
     pub providers: BTreeMap<String, ProviderSettings>,
+    /// Retired with the providers that read browser cookies. Still accepted,
+    /// and ignored, so a config that sets it keeps loading.
+    #[serde(rename = "browser_cookies")]
+    _browser_cookies: IgnoredAny,
 }
 
 impl Default for UsageConfig {
@@ -29,15 +29,15 @@ impl Default for UsageConfig {
             show: true,
             show_providers: Vec::new(),
             hide_providers: Vec::new(),
-            browser_cookies: true,
             providers: BTreeMap::new(),
+            _browser_cookies: IgnoredAny,
         }
     }
 }
 
-/// One provider's table, e.g. `[usage.providers.openrouter]`. Values are kept
-/// as secrets, since most are keys or cookies; names are checked against what
-/// the provider declares.
+/// One provider's table, e.g. `[usage.providers.grok]`. Values are kept as
+/// secrets, since most are tokens; names are checked against what the
+/// provider declares.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(transparent)]
 pub struct ProviderSettings(BTreeMap<String, SecretString>);
@@ -55,15 +55,25 @@ impl ProviderSettings {
 }
 
 impl UsageConfig {
-    /// Rejects unknown provider ids and setting names, so a typo reads as an
-    /// error rather than as a provider that silently never shows.
+    /// Rejects unknown setting names of a known provider, so a typo reads as
+    /// an error rather than as a setting that silently never applies. Unknown
+    /// provider ids, such as those of providers since removed, are only
+    /// logged and then ignored, so an older config keeps loading.
     pub fn validate(&self) -> Result<()> {
+        let known = |id: &str| {
+            let provider = registry::find(id);
+            if provider.is_none() {
+                tracing::warn!(category = "usage", provider = %id, "ignoring unknown usage provider");
+            }
+            provider
+        };
         for id in self.show_providers.iter().chain(&self.hide_providers) {
-            registry::find(id).ok_or_else(|| Error::UnknownUsageProvider(id.clone()))?;
+            known(id);
         }
         for (id, settings) in &self.providers {
-            let provider =
-                registry::find(id).ok_or_else(|| Error::UnknownUsageProvider(id.clone()))?;
+            let Some(provider) = known(id) else {
+                continue;
+            };
             let declared = provider.service().meta().settings;
             if let Some(name) = settings
                 .0

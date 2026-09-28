@@ -1576,6 +1576,22 @@ mod tests {
     use anyhow::Context as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// Usage settings written for providers since removed, or for the
+    /// retired browser cookie import, must not stop the config loading.
+    #[test]
+    fn usage_settings_for_removed_providers_still_load() -> anyhow::Result<()> {
+        let config = Config::parse(
+            "[usage]\nshow_providers = [\"cursor\"]\nhide_providers = [\"gemini\"]\n\
+             browser_cookies = true\n[usage.providers.openrouter]\napi_key = \"x\"\n",
+        )?;
+        assert_eq!(config.usage.show_providers, ["cursor"]);
+        assert!(matches!(
+            Config::parse("[usage.providers.grok]\ncookie = \"x\"\n"),
+            Err(Error::UnknownUsageSetting { .. })
+        ));
+        Ok(())
+    }
+
     /// The daemon's own answer is the starting point, each GUI key overrides
     /// it alone, and the file this GUI writes for a new user pins neither.
     #[test]

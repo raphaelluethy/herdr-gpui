@@ -4,11 +4,7 @@
 use super::probe::{HostPath, Request, Shell};
 use super::{
     Host, Message, Reading, Usage, UsageConfig,
-    cookies::{self, CookieJar},
-    model::{
-        Account, Balance, Kind, Provider, Report, SESSION, Section, Severity, Unit, WEEK, Window,
-        countdown, group,
-    },
+    model::{Account, Kind, Provider, Report, SESSION, Section, Severity, WEEK, Window, countdown},
     probe::{Exec, Probe, Response, json_field},
     providers::{claude, codex},
     registry,
@@ -191,7 +187,6 @@ fn labels_count_down_in_the_two_coarsest_units() {
     assert_eq!(named.label(now), "0% used Fable");
     for (kind, suffix) in [
         (Kind::Session, "5h"),
-        (Kind::Daily, "day"),
         (Kind::Weekly, "wk"),
         (Kind::Monthly, "mo"),
     ] {
@@ -221,20 +216,10 @@ fn pace_compares_use_with_an_even_spend() {
 }
 
 #[test]
-fn balances_read_in_their_own_unit() {
-    let usd = Balance::new("Credits", 12.3, Unit::Currency("USD".into()));
-    assert_eq!(usd.text(), "$12.30");
-    assert_eq!(usd.clone().out_of(50.).text(), "$12.30 of $50.00");
-    assert_eq!(
-        Balance::new("Left", 4.5, Unit::Currency("EUR".into())).text(),
-        "4.50 EUR"
-    );
-    assert_eq!(
-        Balance::new("Points", 1_250_000., Unit::Count("points".into())).text(),
-        "1,250,000 points"
-    );
-    assert_eq!(group(-1234), "-1,234");
+fn severity_follows_the_share_used() {
+    assert_eq!(Severity::from(59.9), Severity::Normal);
     assert_eq!(Severity::from(60.), Severity::Warning);
+    assert_eq!(Severity::from(80.), Severity::Critical);
 }
 
 #[test]
@@ -244,7 +229,7 @@ fn every_provider_is_registered_once_with_its_icon() {
     unique.sort_unstable();
     unique.dedup();
     assert_eq!(unique.len(), ids.len(), "duplicate provider id");
-    assert!(ids.len() >= 87);
+    assert_eq!(ids, ["codex", "claude", "grok"]);
     for provider in registry::all() {
         assert!(
             provider
@@ -281,7 +266,7 @@ fn every_provider_is_registered_once_with_its_icon() {
 }
 
 #[test]
-fn config_names_only_known_providers_and_settings() {
+fn config_checks_known_providers_settings_and_tolerates_the_rest() {
     let parse = |text: &str| -> crate::Result<UsageConfig> {
         let config: UsageConfig = toml::from_str(text)?;
         config.validate()?;
@@ -291,10 +276,19 @@ fn config_names_only_known_providers_and_settings() {
     assert!(config.shown(provider("claude")));
     assert!(config.hidden(provider("codex")));
     assert!(config.show);
-    assert!(matches!(
-        parse("show_providers = [\"nope\"]"),
-        Err(Error::UnknownUsageProvider(id)) if id == "nope"
-    ));
+    // A config written for providers since removed, or for the retired
+    // browser cookie import, still loads; the unknown ids match nothing.
+    let config = parse(
+        "show_providers = [\"cursor\", \"claude\"]\nhide_providers = [\"gemini\"]\n\
+         browser_cookies = false\n[providers.openrouter]\napi_key = \"x\"\n\
+         [providers.grok]\ntoken = \"y\"",
+    )
+    .unwrap();
+    assert!(config.shown(provider("claude")));
+    assert!(!config.shown(provider("codex")));
+    assert!(registry::all().all(|provider| !config.hidden(provider)));
+    assert!(config.settings(provider("grok")).is_some());
+    // A known provider's settings are still checked.
     assert!(matches!(
         parse("[providers.claude]\napi_key = \"x\""),
         Err(Error::UnknownUsageSetting { provider, setting })
@@ -379,9 +373,8 @@ impl FakeHost {
 fn remote_secrets_stay_on_the_host() {
     let host = FakeHost::new();
     let mut exec = Exec::Remote(host.shell());
-    let mut jar = CookieJar::default();
     let codex = provider("codex");
-    let mut probe = Probe::new(&mut exec, codex, None, &mut jar, false);
+    let mut probe = Probe::new(&mut exec, codex, None);
     assert!(probe.is_remote());
     let auth = probe
         .file(&HostPath::env_or("CODEX_HOME", ".codex", "auth.json"))
@@ -393,47 +386,27 @@ fn remote_secrets_stay_on_the_host() {
         Some("acct-fixture")
     );
     assert!(probe.file(&HostPath::home("missing.json")).is_none());
-    assert!(probe.exists(&HostPath::home(".codex")));
-    assert!(!probe.exists(&HostPath::home("nowhere")));
 
     let response = probe
         .http(
-            Request::post("https://example.com/usage?q=a+b")
+            Request::get("https://example.com/usage?q=a+b")
                 .bearer(&token)
-                .header("X-Plain", "it's $HOME `x` \\ \"q\"")
-                .json("{\"k\":\"v\"}"),
+                .header("X-Plain", "it's $HOME `x` \\ \"q\""),
         )
         .unwrap();
     assert_eq!(response.status, 200);
     assert_eq!(response.body, "{\"token\":\"minted-secret\",\"ok\":true}");
 
-    let minted = probe
-        .exchange(
-            Request::get("https://example.com/mint").bearer(&token),
-            &["token"],
-        )
-        .unwrap();
-    assert!(format!("{minted:?}").contains("remote"));
-    probe
-        .http(Request::get("https://example.com/next").bearer(&minted))
-        .unwrap();
-
     let log = host.log();
     for line in log.lines().filter(|line| line.starts_with("args: ")) {
-        assert!(
-            !line.contains("fixture") && !line.contains("minted"),
-            "{line}"
-        );
+        assert!(!line.contains("fixture"), "{line}");
     }
     assert!(log.contains("header = \"Authorization: Bearer codex-fixture-token\""));
-    assert!(log.contains("header = \"Authorization: Bearer minted-secret\""));
     // Literal text survives both the shell and curl's config quoting.
     assert!(
         log.contains(r#"header = "X-Plain: it's $HOME `x` \\ \"q\"""#),
         "{log}"
     );
-    assert!(log.contains(r#"data-raw = "{\"k\":\"v\"}""#), "{log}");
-    assert!(log.contains("request = \"POST\""));
     assert!(!log.contains("id-fixture"));
 }
 
@@ -460,102 +433,12 @@ fn remote_steps_report_failure_and_keep_the_session() {
 
 #[test]
 fn settings_come_from_this_machines_config() {
-    let settings = ProviderSettings::default().with("api_key", "config-key");
+    let settings = ProviderSettings::default().with("token", "config-token");
     let mut exec = Exec::Local;
-    let mut jar = CookieJar::default();
-    let probe = Probe::new(
-        &mut exec,
-        provider("claude"),
-        Some(&settings),
-        &mut jar,
-        false,
-    );
-    assert_eq!(probe.text_setting("api_key").as_deref(), Some("config-key"));
+    let probe = Probe::new(&mut exec, provider("grok"), Some(&settings));
+    let token = probe.setting("token").unwrap();
+    assert_eq!(format!("{token:?}"), "Secret(here)");
     assert!(probe.setting("missing").is_none());
-}
-
-#[test]
-fn chrome_values_decrypt_with_the_derived_key() {
-    use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
-    let mut key = [0u8; 16];
-    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(b"peanuts", b"saltysalt", 1, &mut key);
-    let seal = |plain: &[u8]| {
-        let mut sealed = b"v10".to_vec();
-        let mut buffer = plain.to_vec();
-        buffer.resize(plain.len() + 16, 0);
-        let length = cbc::Encryptor::<aes::Aes128>::new(&key.into(), &[b' '; 16].into())
-            .encrypt_padded::<Pkcs7>(&mut buffer, plain.len())
-            .unwrap()
-            .len();
-        sealed.extend_from_slice(&buffer[..length]);
-        sealed
-    };
-    assert_eq!(
-        cookies::decrypt(&seal(b"session-value"), &key, false).as_deref(),
-        Some("session-value")
-    );
-    let mut hashed = vec![0u8; 32];
-    hashed.extend_from_slice(b"session-value");
-    assert_eq!(
-        cookies::decrypt(&seal(&hashed), &key, true).as_deref(),
-        Some("session-value")
-    );
-    assert_eq!(cookies::decrypt(b"v11whatever", &key, false), None);
-    assert_eq!(cookies::decrypt(&seal(b"x")[..10], &key, false), None);
-}
-
-#[test]
-fn safari_binary_cookies_parse() {
-    fn record(domain: &str, name: &str, value: &str, expires: f64) -> Vec<u8> {
-        let mut strings = Vec::new();
-        let base = 56u32;
-        let mut offsets = Vec::new();
-        for text in [domain, name, "/", value] {
-            offsets.push(base + strings.len() as u32);
-            strings.extend_from_slice(text.as_bytes());
-            strings.push(0);
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(&(base + strings.len() as u32).to_le_bytes());
-        out.extend_from_slice(&[0; 12]);
-        for offset in &offsets {
-            out.extend_from_slice(&offset.to_le_bytes());
-        }
-        out.extend_from_slice(&[0; 8]);
-        out.extend_from_slice(&expires.to_le_bytes());
-        out.extend_from_slice(&0f64.to_le_bytes());
-        out.extend_from_slice(&strings);
-        out
-    }
-    let records = [
-        record(".example.com", "sid", "abc", 2e9),
-        record("other.org", "x", "y", 1.),
-    ];
-    let mut page = vec![0, 0, 1, 0];
-    page.extend_from_slice(&(records.len() as u32).to_le_bytes());
-    let mut offset = 8 + 4 * records.len() as u32 + 4;
-    for record in &records {
-        page.extend_from_slice(&offset.to_le_bytes());
-        offset += record.len() as u32;
-    }
-    page.extend_from_slice(&[0; 4]);
-    for record in &records {
-        page.extend_from_slice(record);
-    }
-    let mut file = b"cook".to_vec();
-    file.extend_from_slice(&1u32.to_be_bytes());
-    file.extend_from_slice(&(page.len() as u32).to_be_bytes());
-    file.extend_from_slice(&page);
-    let cookies = cookies::binary_cookies(&file).unwrap();
-    assert_eq!(cookies.len(), 2);
-    assert_eq!(cookies[0].0.domain, ".example.com");
-    assert_eq!(cookies[0].0.name, "sid");
-    assert_eq!(cookies[0].0.value, "abc");
-    assert!(cookies[0].1.is_some_and(|at| at > SystemTime::now()));
-    assert!(cookies::binary_cookies(b"nope").is_none());
-    assert!(cookies::matches_domain(".example.com", "example.com"));
-    assert!(cookies::matches_domain("app.example.com", "example.com"));
-    assert!(!cookies::matches_domain("badexample.com", "example.com"));
 }
 
 fn report(provider: Provider, used: f64) -> Report {
@@ -725,33 +608,26 @@ fn example_config_documents_every_provider_setting() {
 
 /// Reads this machine's real sign-ins and prints what each provider found:
 /// `cargo test -p herdr-gpui live_local_usage -- --ignored --nocapture`.
-/// Prints windows, balances, and typed errors only, never credentials.
+/// Prints windows and typed errors only, never credentials.
 #[test]
 #[ignore = "reads this machine's agent sign-ins and calls their services"]
 fn live_local_usage() {
-    let mut jar = CookieJar::default();
-    super::read(
-        &Host::Local,
-        &UsageConfig::default(),
-        &mut jar,
-        |provider, report| {
-            match report {
-                Ok(report) => println!(
-                    "{}: plan {:?}, windows {:?}, balances {:?}",
-                    provider.id(),
-                    report.account.plan,
-                    report
-                        .windows
-                        .iter()
-                        .map(|w| format!("{} {}%", w.kind.title(), w.percent()))
-                        .collect::<Vec<_>>(),
-                    report.balances.iter().map(|b| b.text()).collect::<Vec<_>>()
-                ),
-                Err(error) => println!("{}: error {error:?}", provider.id()),
-            }
-            true
-        },
-    )
+    super::read(&Host::Local, &UsageConfig::default(), |provider, report| {
+        match report {
+            Ok(report) => println!(
+                "{}: plan {:?}, windows {:?}",
+                provider.id(),
+                report.account.plan,
+                report
+                    .windows
+                    .iter()
+                    .map(|w| format!("{} {}%", w.kind.title(), w.percent()))
+                    .collect::<Vec<_>>()
+            ),
+            Err(error) => println!("{}: error {error:?}", provider.id()),
+        }
+        true
+    })
     .unwrap();
 }
 
@@ -762,36 +638,39 @@ fn the_status_bar_shows_the_two_closest_to_a_limit() {
         report: used.map(|used| report(provider(id), used)),
         error: None,
     };
-    let mut entry = super::Entry {
-        readings: vec![
-            reading("codex", Some(12.)),
-            reading("gemini", None),
-            reading("copilot", Some(4.)),
-            reading("claude", Some(32.)),
-            reading("zed", Some(12.)),
-        ],
-        ..Default::default()
-    };
-    // An answer with neither windows nor balances has nothing to show.
-    entry.readings.push(Reading {
-        provider: provider("azureopenai"),
-        report: Some(Report::new(
-            provider("azureopenai"),
-            Account::default(),
-            vec![],
-        )),
-        error: None,
-    });
-    let ids = |limit| {
+    let ids = |entry: &super::Entry, limit| {
         entry
             .headline(limit)
             .iter()
             .map(|reading| reading.provider.id())
             .collect::<Vec<_>>()
     };
-    assert_eq!(ids(super::HEADLINE), ["claude", "codex"]);
+    let entry = super::Entry {
+        readings: vec![
+            reading("codex", Some(12.)),
+            reading("claude", Some(32.)),
+            reading("grok", Some(12.)),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(ids(&entry, super::HEADLINE), ["claude", "codex"]);
     // Ties keep the registry order.
-    assert_eq!(ids(10), ["claude", "codex", "zed", "copilot"]);
+    assert_eq!(ids(&entry, 10), ["claude", "codex", "grok"]);
+
+    // No report yet, or an answer without windows, has nothing to show.
+    let entry = super::Entry {
+        readings: vec![
+            reading("codex", None),
+            reading("claude", Some(5.)),
+            Reading {
+                provider: provider("grok"),
+                report: Some(Report::new(provider("grok"), Account::default(), vec![])),
+                error: None,
+            },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(ids(&entry, 10), ["claude"]);
 }
 
 #[test]
@@ -804,10 +683,10 @@ fn panel_tabs_leave_out_sign_ins_with_nothing_to_show() {
     let without = |id: &str| Reading {
         provider: provider(id),
         report: None,
-        error: Some(Error::UsageNoPlan.to_string()),
+        error: Some(Error::UsageNotSignedIn.to_string()),
     };
     let entry = super::Entry {
-        readings: vec![with("codex"), without("gemini"), without("cursor")],
+        readings: vec![with("codex"), without("claude"), without("grok")],
         ..Default::default()
     };
     let tabs = |config: &UsageConfig| {
@@ -819,6 +698,6 @@ fn panel_tabs_leave_out_sign_ins_with_nothing_to_show() {
     };
     assert_eq!(tabs(&UsageConfig::default()), ["codex"]);
     // Asked for by the config: shown, so its panel can say what to set up.
-    let asked: UsageConfig = toml::from_str("show_providers = [\"cursor\"]").unwrap();
-    assert_eq!(tabs(&asked), ["codex", "cursor"]);
+    let asked: UsageConfig = toml::from_str("show_providers = [\"grok\"]").unwrap();
+    assert_eq!(tabs(&asked), ["codex", "grok"]);
 }
