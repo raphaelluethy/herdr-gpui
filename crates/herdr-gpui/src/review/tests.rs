@@ -2,7 +2,7 @@
 //! Headless tests of the panel in a window: toggling, selecting a file,
 //! writing a comment, and sending it. Git runs against a repository made for
 //! the test; the daemon is a fixture snapshot.
-use super::{Mode, Review, status::Staged, view::open_target, worker::tests::Repo};
+use super::{Mode, Review, Source, status::Staged, view::open_target, worker::tests::Repo};
 use crate::{
     HerdrWindow,
     controls::Command,
@@ -56,8 +56,11 @@ fn open_on(repo: &Repo, view: &Entity<HerdrWindow>, cx: &mut VisualTestContext) 
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
             view.toggle_review(window, cx);
-            view.review
-                .track(Some(repo.input.clone()), true, Instant::now());
+            view.review.track(
+                Some(Source::Worktree(repo.input.clone())),
+                true,
+                Instant::now(),
+            );
         })
     });
     wait_for(view, cx, "the listing", |review| review.listing().is_some());
@@ -117,6 +120,53 @@ fn with_pane(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext, agent: Opti
     });
 }
 
+/// The owned local daemon, focused on workspace `w0`, which Herdr keeps no
+/// worktree for, with its focused pane working in `directory`.
+fn focus_pane_in(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext, directory: &str) {
+    cx.update(|_, cx| {
+        view.update(cx, |view, _| {
+            view.live.status = crate::state::ConnectionStatus::Connected;
+            view.live.local_daemon_peer = true;
+            view.selected_endpoint = 0;
+            view.active = true;
+            let mut shown: serde_json::Value =
+                serde_json::to_value(view.live.snapshot.as_deref().unwrap()).unwrap();
+            shown["focused_workspace_id"] = serde_json::json!("w0");
+            shown["focused_pane_id"] = serde_json::json!("w0:p1");
+            shown["panes"] = serde_json::json!([{
+                "pane_id": "w0:p1", "workspace_id": "w0", "tab_id": "t0", "label": null,
+                "cwd": "/", "foreground_cwd": directory, "focused": true,
+                "right_click_passthrough": false
+            }]);
+            view.live.snapshot = Some(Arc::new(serde_json::from_value(shown).unwrap()));
+            assert!(view.git.tracked().is_none(), "no Herdr worktree to follow");
+        });
+    });
+}
+
+/// Runs the window's own review tick until `ready` holds, within a bound.
+fn follow_until(
+    view: &Entity<HerdrWindow>,
+    cx: &mut VisualTestContext,
+    what: &str,
+    ready: impl Fn(&Review) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let done = cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.update_review();
+                ready(&view.review)
+            })
+        });
+        if done {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn clipboard(cx: &mut VisualTestContext) -> Option<String> {
     cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
 }
@@ -167,6 +217,111 @@ fn the_panel_toggles_beside_the_terminal_and_explains_when_there_is_no_checkout(
         cx.debug_bounds("terminal").unwrap().size.width,
         terminal_before.size.width
     );
+}
+
+#[gpui::test]
+fn a_workspace_without_a_herdr_worktree_is_reviewed_from_its_open_tab(cx: &mut TestAppContext) {
+    let repo = Repo::new();
+    repo.write("dir/new.txt", "fresh\n");
+    let subdirectory = repo.directory.path().join("dir");
+    let (view, cx) = window(cx);
+    focus_pane_in(&view, cx, subdirectory.to_str().unwrap());
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.update_review();
+            view.toggle_review(window, cx);
+        })
+    });
+    follow_until(&view, cx, "the listing", |review| {
+        review.listing().is_some()
+    });
+    let root = repo.git(&["rev-parse", "--show-toplevel"]);
+    view.update(cx, |view, _| {
+        let checkout = view.review.checkout().unwrap();
+        assert_eq!(checkout.checkout.as_deref(), Some(root.as_str()));
+        assert_eq!(checkout.branch, "feature");
+        assert!(
+            view.review
+                .listing()
+                .unwrap()
+                .entry("dir/new.txt")
+                .is_some()
+        );
+    });
+    draw(cx);
+    assert!(cx.debug_bounds("review-branch").is_some());
+    assert!(cx.debug_bounds("review-unavailable").is_none());
+
+    // Moving within the checkout keeps what is shown while Git is asked.
+    focus_pane_in(&view, cx, &root);
+    view.update(cx, |view, _| {
+        view.update_review();
+        assert!(view.review.listing().is_some());
+    });
+    follow_until(&view, cx, "the lookup", |review| !review.refreshing());
+    view.update(cx, |view, _| {
+        assert_eq!(
+            view.review.checkout().unwrap().checkout.as_deref(),
+            Some(root.as_str())
+        );
+        assert!(view.review.listing().is_some());
+    });
+
+    // A tab outside any checkout has nothing to review, and says why.
+    let outside = tempfile::tempdir().unwrap();
+    focus_pane_in(&view, cx, outside.path().to_str().unwrap());
+    follow_until(&view, cx, "the lookup", |review| {
+        review.checkout().is_none() && !review.finding()
+    });
+    view.update(cx, |view, _| assert!(view.review.error().is_some()));
+    draw(cx);
+    assert!(cx.debug_bounds("review-unavailable").is_some());
+    assert!(cx.debug_bounds("review-unavailable-reason").is_some());
+    assert!(cx.debug_bounds("review-files").is_none());
+    // Checking again keeps the answer on screen instead of flickering.
+    view.update(cx, |view, _| {
+        view.review.refresh();
+        assert!(!view.review.finding());
+    });
+}
+
+#[gpui::test]
+fn a_lookup_for_a_tab_no_longer_focused_is_dropped(cx: &mut TestAppContext) {
+    let repo = Repo::new();
+    let outside = tempfile::tempdir().unwrap();
+    let (view, cx) = window(cx);
+    let first = Some(Source::Directory(
+        repo.directory.path().to_str().unwrap().to_owned(),
+    ));
+    let second = Some(Source::Directory(
+        outside.path().to_str().unwrap().to_owned(),
+    ));
+    view.update(cx, |view, _| {
+        let now = Instant::now();
+        view.review.track(first, true, now);
+        view.review.poll(false, now);
+        assert!(view.review.finding(), "the first lookup is on its way");
+        view.review.track(second.clone(), true, now);
+    });
+    // The first answer arrives after the focus moved and must not be shown.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let done = view.update(cx, |view, _| {
+            let now = Instant::now();
+            view.review.track(second.clone(), true, now);
+            view.review.poll(false, now);
+            assert!(view.review.checkout().is_none(), "a stale lookup was shown");
+            !view.review.finding() && view.review.error().is_some()
+        });
+        if done {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the lookup"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[gpui::test]
@@ -388,10 +543,14 @@ fn comments_are_written_inline_kept_per_checkout_and_go_stale(cx: &mut TestAppCo
                 repo_key: "/elsewhere/.git".into(),
                 branch: "main".into(),
             };
-            view.review.track(Some(other), false, Instant::now());
-            assert_eq!(view.review.note_count(), 0);
             view.review
-                .track(Some(repo.input.clone()), true, Instant::now());
+                .track(Some(Source::Worktree(other)), false, Instant::now());
+            assert_eq!(view.review.note_count(), 0);
+            view.review.track(
+                Some(Source::Worktree(repo.input.clone())),
+                true,
+                Instant::now(),
+            );
             assert_eq!(view.review.note_count(), 1);
         })
     });

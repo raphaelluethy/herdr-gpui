@@ -125,6 +125,81 @@ pub(crate) enum Completion {
     Write(crate::Result<()>),
 }
 
+/// What the worker is asked: which checkout holds a directory, or a job
+/// against a checkout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Request {
+    Resolve(String),
+    Run(Input, Job),
+}
+
+/// The worker's answer, carrying what it was asked about so the panel can
+/// drop one that no longer matches what it shows.
+pub(crate) enum Reply {
+    Resolved {
+        directory: String,
+        result: crate::Result<Input>,
+    },
+    Ran(Input, Completion),
+}
+
+pub(crate) fn answer(request: Request, cancelled: &impl Fn() -> bool) -> Reply {
+    match request {
+        Request::Resolve(directory) => Reply::Resolved {
+            result: resolve(&directory, Instant::now() + READ_TIMEOUT, cancelled),
+            directory,
+        },
+        Request::Run(input, job) => {
+            let completion = execute(&input, job, cancelled);
+            Reply::Ran(input, completion)
+        }
+    }
+}
+
+/// The checkout holding `directory`, as `local_checkout` verifies it before
+/// every job: the worktree's top level, its repository, and the branch
+/// checked out there. A detached HEAD has no branch to review.
+pub(crate) fn resolve(
+    directory: &str,
+    deadline: Instant,
+    cancelled: &impl Fn() -> bool,
+) -> crate::Result<Input> {
+    if !Path::new(directory).is_absolute() {
+        return Err(Error::PrAbsolutePath);
+    }
+    let root = git(
+        directory,
+        &["rev-parse", "--show-toplevel"],
+        "find the checkout",
+        deadline,
+        cancelled,
+    )?;
+    let repo_key = git(
+        &root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        "find the repository",
+        deadline,
+        cancelled,
+    )?;
+    // With `--quiet`, and the checkout already found, Git refuses only a
+    // HEAD that names no branch.
+    let branch = match git(
+        &root,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        "read the branch",
+        deadline,
+        cancelled,
+    ) {
+        Err(Error::GitFailed { .. }) => return Err(Error::ReviewDetached),
+        result => result?,
+    };
+    Ok(Input {
+        checkout: Some(root),
+        repo_key,
+        branch,
+    })
+}
+
 pub(crate) fn execute(input: &Input, job: Job, cancelled: &impl Fn() -> bool) -> Completion {
     match job {
         Job::List(mode) => {
@@ -702,6 +777,46 @@ pub(crate) mod tests {
             "refs/remotes/origin/main",
         ]);
         assert_eq!(repo.list(Mode::Branch).base.unwrap().name, "origin/main");
+    }
+
+    #[test]
+    fn a_directory_resolves_to_the_checkout_and_branch_holding_it() {
+        let repo = Repo::new();
+        repo.write("dir/new.txt", "fresh\n");
+        let deadline = || Instant::now() + READ_TIMEOUT;
+        let subdirectory = repo.directory.path().join("dir");
+        let input = resolve(subdirectory.to_str().unwrap(), deadline(), &|| false).unwrap();
+        assert_eq!(
+            input.checkout.as_deref(),
+            Some(repo.git(&["rev-parse", "--show-toplevel"]).as_str())
+        );
+        assert_eq!(
+            input.repo_key,
+            repo.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        );
+        assert_eq!(input.branch, "feature");
+        // What it finds is what every job verifies before it runs.
+        let Completion::List(Ok(listing)) =
+            execute(&input, Job::List(Mode::Uncommitted), &|| false)
+        else {
+            panic!("listing");
+        };
+        assert!(listing.entry("dir/new.txt").is_some());
+
+        repo.git(&["checkout", "-q", "--detach"]);
+        assert!(matches!(
+            resolve(subdirectory.to_str().unwrap(), deadline(), &|| false),
+            Err(Error::ReviewDetached)
+        ));
+        let outside = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            resolve(outside.path().to_str().unwrap(), deadline(), &|| false),
+            Err(Error::GitFailed { .. })
+        ));
+        assert!(matches!(
+            resolve("relative/dir", deadline(), &|| false),
+            Err(Error::PrAbsolutePath)
+        ));
     }
 
     #[test]

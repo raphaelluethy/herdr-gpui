@@ -226,6 +226,8 @@ pub enum Error {
     ReviewUnborn,
     #[error("Git named a path outside the checkout; it was not touched.")]
     ReviewUnsafePath,
+    #[error("HEAD is detached; check out a branch to review it.")]
+    ReviewDetached,
     #[error("Could not {operation} the file.")]
     ReviewFile {
         operation: &'static str,

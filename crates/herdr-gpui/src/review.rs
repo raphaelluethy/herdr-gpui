@@ -35,7 +35,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use worker::{Completion, Job, Listing};
+use worker::{Completion, Job, Listing, Reply, Request};
 
 /// The listing refreshes at the sidebar's cadence while the panel shows and
 /// the window is active; a failure waits longer before trying again.
@@ -69,6 +69,16 @@ impl Mode {
     }
 }
 
+/// Where the panel finds the checkout it reviews.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// The focused workspace's Herdr worktree, the one the Git popup acts on.
+    Worktree(Input),
+    /// The directory of the focused tab's pane, in a workspace Herdr keeps no
+    /// worktree for. The worker asks Git which checkout holds it.
+    Directory(String),
+}
+
 /// A comment being written: the diff rows it will cover, in the file whose
 /// diff is loaded, and the note it edits when it is not new.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,8 +99,8 @@ pub(crate) struct Loaded {
 }
 
 struct Worker {
-    requests: mpsc::SyncSender<(u64, Input, Job)>,
-    results: mpsc::Receiver<(Input, Completion)>,
+    requests: mpsc::SyncSender<(u64, Request)>,
+    results: mpsc::Receiver<Reply>,
 }
 
 /// The panel's state: what it shows, what it is asking Git, and the notes.
@@ -109,6 +119,12 @@ pub(crate) struct Review {
     generation: Arc<AtomicU64>,
     busy: Option<Job>,
     queue: VecDeque<Job>,
+    source: Option<Source>,
+    /// A directory source asks Git for its checkout before the next listing:
+    /// the branch checked out there can change while the directory does not.
+    resolve_due: bool,
+    /// A directory's checkout is being looked up.
+    resolving: bool,
     checkout: Option<Input>,
     listing: Option<Arc<Listing>>,
     selected: Option<String>,
@@ -156,6 +172,9 @@ impl Review {
             generation: Arc::default(),
             busy: None,
             queue: VecDeque::new(),
+            source: None,
+            resolve_due: false,
+            resolving: false,
             checkout: None,
             listing: None,
             selected: None,
@@ -211,8 +230,16 @@ impl Review {
         self.busy.as_ref().is_some_and(Job::is_write) || self.queue.iter().any(Job::is_write)
     }
 
+    /// Git is being asked which checkout holds the focused tab's directory
+    /// for the first time. A later check of a directory outside any checkout
+    /// keeps showing Git's last answer rather than flickering.
+    pub(crate) fn finding(&self) -> bool {
+        self.checkout.is_none() && self.error.is_none() && (self.resolving || self.resolve_due)
+    }
+
     pub(crate) fn refreshing(&self) -> bool {
-        matches!(self.busy, Some(Job::List(_)))
+        self.resolving
+            || matches!(self.busy, Some(Job::List(_)))
             || self.queue.iter().any(|job| matches!(job, Job::List(_)))
     }
 
@@ -231,40 +258,73 @@ impl Review {
         self.notebook().map_or(0, Notebook::len)
     }
 
-    /// Follows the focused checkout and schedules the listing's refresh.
-    /// `refresh` is false while the panel is hidden or the window inactive:
-    /// what is on screen stays, and Git is not polled behind the user's back.
-    pub(crate) fn track(&mut self, checkout: Option<Input>, refresh: bool, now: Instant) -> bool {
+    /// Follows the focused tab's checkout and schedules the listing's
+    /// refresh. `refresh` is false while the panel is hidden or the window
+    /// inactive: what is on screen stays, and Git is not polled behind the
+    /// user's back, not even to find a directory's checkout.
+    pub(crate) fn track(&mut self, source: Option<Source>, refresh: bool, now: Instant) -> bool {
         let mut changed = false;
-        if self.checkout != checkout {
-            // Notes stay in their checkout's notebook; everything drawn from
-            // the old checkout goes.
-            self.checkout = checkout;
-            self.listing = None;
-            self.selected = None;
-            self.loaded = None;
-            self.loading = None;
-            self.draft = None;
+        if self.source != source {
+            self.source = source;
+            self.resolve_due = false;
             self.error = None;
-            self.queue.clear();
-            self.generation.fetch_add(1, Ordering::Relaxed);
-            self.due = Some(now);
             changed = true;
+            match self.source.clone() {
+                Some(Source::Worktree(input)) => {
+                    self.set_checkout(Some(input), now);
+                }
+                // The checkout shown stays until Git says which one holds the
+                // directory, so moving within a checkout does not blank it.
+                Some(Source::Directory(_)) => self.due = Some(now),
+                None => {
+                    self.set_checkout(None, now);
+                }
+            }
         }
         if refresh
-            && self.checkout.is_some()
+            && self.source.is_some()
             && self.due.is_some_and(|due| now >= due)
             && !self.refreshing()
         {
             self.due = None;
-            self.enqueue(Job::List(self.mode));
+            self.resolve_due = self.resolves();
+            if self.checkout.is_some() {
+                self.enqueue(Job::List(self.mode));
+            }
         }
         changed
     }
 
+    /// Shows `checkout`, dropping everything drawn from the one shown before.
+    /// Notes stay in their checkout's notebook.
+    fn set_checkout(&mut self, checkout: Option<Input>, now: Instant) -> bool {
+        if self.checkout == checkout {
+            return false;
+        }
+        self.checkout = checkout;
+        self.listing = None;
+        self.selected = None;
+        self.loaded = None;
+        self.loading = None;
+        self.draft = None;
+        self.error = None;
+        self.queue.clear();
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        self.due = Some(now);
+        true
+    }
+
+    fn resolves(&self) -> bool {
+        matches!(self.source, Some(Source::Directory(_)))
+    }
+
     /// Asks for the listing again now.
     pub(crate) fn refresh(&mut self) {
-        if self.checkout.is_some() && !self.refreshing() {
+        if self.refreshing() {
+            return;
+        }
+        self.resolve_due = self.resolves();
+        if self.checkout.is_some() {
             self.due = None;
             self.enqueue(Job::List(self.mode));
         }
@@ -508,7 +568,11 @@ impl Review {
         self.git_was_running = git_running;
         if let Some(worker) = &self.worker {
             match worker.results.try_recv() {
-                Ok((input, completion)) => {
+                Ok(Reply::Resolved { directory, result }) => {
+                    self.resolving = false;
+                    changed |= self.resolved(&directory, result, now);
+                }
+                Ok(Reply::Ran(input, completion)) => {
                     self.busy = None;
                     changed = true;
                     if self.checkout.as_ref() == Some(&input) {
@@ -517,6 +581,7 @@ impl Review {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.busy = None;
+                    self.resolving = false;
                     self.queue.clear();
                     self.worker = None;
                     self.loading = None;
@@ -527,13 +592,48 @@ impl Review {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
-        if self.busy.is_none()
-            && let Some(checkout) = self.checkout.clone()
+        if self.busy.is_some() || self.resolving {
+            return changed;
+        }
+        // The checkout is found before any job runs against it.
+        if self.resolve_due
+            && let Some(Source::Directory(directory)) = &self.source
+        {
+            self.resolve_due = false;
+            let request = Request::Resolve(directory.clone());
+            changed |= self.send(request, now);
+        } else if let Some(checkout) = self.checkout.clone()
             && let Some(job) = self.queue.pop_front()
         {
-            changed |= self.send(checkout, job, now);
+            changed |= self.send(Request::Run(checkout, job), now);
         }
         changed
+    }
+
+    /// Shows the checkout Git found for `directory`, while it is still the
+    /// focused tab's. A directory outside any checkout, or on a detached
+    /// HEAD, has nothing to review; Git's reason is kept for the panel.
+    fn resolved(&mut self, directory: &str, result: crate::Result<Input>, now: Instant) -> bool {
+        if !matches!(&self.source, Some(Source::Directory(current)) if current == directory) {
+            return false;
+        }
+        match result {
+            Ok(input) => {
+                if !self.set_checkout(Some(input), now) {
+                    return false;
+                }
+                // Found while refreshing, so the listing follows at once.
+                self.due = None;
+                self.enqueue(Job::List(self.mode));
+                true
+            }
+            Err(error) => {
+                self.set_checkout(None, now);
+                self.error = Some(error.to_string());
+                self.due = Some(now + REFRESH);
+                true
+            }
+        }
     }
 
     fn apply(&mut self, completion: Completion, now: Instant) {
@@ -619,18 +719,17 @@ impl Review {
         }
     }
 
-    fn send(&mut self, checkout: Input, job: Job, now: Instant) -> bool {
+    fn send(&mut self, request: Request, now: Instant) -> bool {
         if self.worker.is_none() {
-            let (requests, incoming) = mpsc::sync_channel::<(u64, Input, Job)>(1);
+            let (requests, incoming) = mpsc::sync_channel::<(u64, Request)>(1);
             let (outgoing, results) = mpsc::sync_channel(1);
             let current = self.generation.clone();
             match thread::Builder::new()
                 .name("herdr-review".into())
                 .spawn(move || {
-                    for (generation, input, job) in incoming {
+                    for (generation, request) in incoming {
                         let cancelled = || current.load(Ordering::Relaxed) != generation;
-                        let completion = worker::execute(&input, job, &cancelled);
-                        if outgoing.send((input, completion)).is_err() {
+                        if outgoing.send(worker::answer(request, &cancelled)).is_err() {
                             break;
                         }
                     }
@@ -653,16 +752,19 @@ impl Review {
             return false;
         };
         let generation = self.generation.load(Ordering::Relaxed);
-        match worker
-            .requests
-            .try_send((generation, checkout, job.clone()))
-        {
+        match worker.requests.try_send((generation, request.clone())) {
             Ok(()) => {
-                self.busy = Some(job);
+                match request {
+                    Request::Resolve(_) => self.resolving = true,
+                    Request::Run(_, job) => self.busy = Some(job),
+                }
                 false
             }
-            Err(mpsc::TrySendError::Full((_, _, job))) => {
-                self.queue.push_front(job);
+            Err(mpsc::TrySendError::Full(_)) => {
+                match request {
+                    Request::Resolve(_) => self.resolve_due = true,
+                    Request::Run(_, job) => self.queue.push_front(job),
+                }
                 false
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
