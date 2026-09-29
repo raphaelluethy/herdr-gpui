@@ -956,14 +956,20 @@ herdr-gpui browser skill > ~/.claude/skills/herdr-gpui-browser/SKILL.md
 
 Cmd-Shift-G (`toggle_review_panel`), **View > Toggle Review Panel**, the
 command palette, or **Review changes** in the title bar's Git popup opens a
-dock to the right of the terminal that reviews the focused workspace's
-checkout, modeled on Zed's git panel and project diff. The terminal shrinks to
+dock to the right of the terminal that reviews the checkout of the tab you
+are in, modeled on Zed's git panel and project diff. The terminal shrinks to
 make room and follows the new size; drag the panel's left edge to resize it,
 double-click the edge to restore the default width.
 
-- Only a local checkout is reviewed: the same owned local daemon and verified
-  worktree the Git popup acts on. Remote and SSH workspaces show a note saying
-  the panel does not support them yet.
+- Only a local checkout is reviewed, on the owned local daemon. A workspace
+  Herdr created as a worktree is reviewed in the worktree the Git popup acts
+  on. Any other workspace is reviewed in the checkout holding the directory
+  its focused pane works in (the foreground process's, else the shell's), so
+  switching tabs or changing directory follows along; Git is asked which
+  checkout that is, again before each refresh, since the branch can change
+  under the same directory. A directory outside any checkout, or a detached
+  HEAD, shows a note with Git's reason. Remote and SSH workspaces show a note
+  saying the panel does not support them yet.
 - **Uncommitted** lists the working tree against HEAD, in the sections
   Conflicts, Tracked, and Untracked, with the status letter colored as Zed
   colors it, the file name, and its folder in muted text. Each tracked or

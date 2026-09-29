@@ -2,7 +2,7 @@
 //! keyboard handling while the panel has focus, and the actions its controls
 //! perform, from staging to sending the comments to an agent.
 use super::{
-    Mode,
+    Mode, Source,
     agents::{self, Candidate},
     notes::{Subject, prompt},
     status::safe_relative,
@@ -31,9 +31,35 @@ impl HerdrWindow {
     pub(crate) fn update_review(&mut self) -> bool {
         let now = Instant::now();
         let refresh = self.review.open && self.active;
-        let mut changed = self.review.track(self.git.tracked().cloned(), refresh, now);
+        let source = self
+            .git
+            .tracked()
+            .cloned()
+            .map(Source::Worktree)
+            .or_else(|| self.focused_directory().map(Source::Directory));
+        let mut changed = self.review.track(source, refresh, now);
         changed |= self.review.poll(self.git.running().is_some(), now);
         changed
+    }
+
+    /// Where the process in the focused tab's pane works, on the owned local
+    /// daemon only: Herdr keeps a worktree only for workspaces it created as
+    /// one, so every other workspace is reviewed from its open tab.
+    fn focused_directory(&self) -> Option<String> {
+        if !self.local_git_endpoint() {
+            return None;
+        }
+        let snapshot = self.live.snapshot.as_ref()?;
+        let pane = snapshot
+            .panes
+            .iter()
+            .find(|pane| Some(&pane.pane_id) == snapshot.focused_pane_id.as_ref())
+            .or_else(|| snapshot.panes.iter().find(|pane| pane.focused))?;
+        pane.foreground_cwd
+            .as_deref()
+            .or(pane.cwd.as_deref())
+            .filter(|path| std::path::Path::new(path).is_absolute())
+            .map(str::to_owned)
     }
 
     pub(crate) fn toggle_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -233,14 +233,31 @@ impl HerdrWindow {
             )
             .child(self.render_review_header(&theme, cx));
         let panel = match self.review.checkout().cloned() {
+            None if self.review.finding() => panel.child(
+                div()
+                    .debug_selector(|| "review-finding".into())
+                    .p_3()
+                    .text_color(rgb(theme.muted))
+                    .child("Finding the checkout\u{2026}"),
+            ),
             None => panel.child(
                 div()
                     .debug_selector(|| "review-unavailable".into())
                     .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
                     .text_color(rgb(theme.muted))
                     .child(
-                        "Review needs a local checkout. Focus a workspace with a Git worktree on this machine; remote and SSH workspaces are not supported yet.",
-                    ),
+                        "Review needs a local Git checkout. Focus a tab whose pane works in a Git repository on this machine; remote and SSH workspaces are not supported yet.",
+                    )
+                    .when_some(self.review.error(), |note, error| {
+                        note.child(
+                            div()
+                                .debug_selector(|| "review-unavailable-reason".into())
+                                .child(error.to_owned()),
+                        )
+                    }),
             ),
             Some(_) => panel
                 .child(self.render_review_files(&theme, cx))
