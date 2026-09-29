@@ -9,8 +9,14 @@ use gpui::{ClipboardItem, Context, Pixels, Point};
 
 impl HerdrWindow {
     /// Starts a selection under the pointer, discarding the previous one. A
-    /// press that lands outside the painted cells only clears.
-    pub(crate) fn begin_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    /// double click starts on the link or word under it and a triple click on
+    /// its row. A press that lands outside the painted cells only clears.
+    pub(crate) fn begin_selection(
+        &mut self,
+        position: Point<Pixels>,
+        clicks: usize,
+        cx: &mut Context<Self>,
+    ) {
         let cleared = self.selection.take().is_some();
         if let Some(surface) = self.selectable_surface(position) {
             let (x, y) = Self::terminal_offset(self.bounds, position);
@@ -20,6 +26,7 @@ impl HerdrWindow {
                 y,
                 self.cell_width,
                 self.config.terminal.line_height(),
+                clicks,
             );
         }
         if cleared || self.selection.is_some() {
@@ -555,7 +562,7 @@ mod tests {
         cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("kept".into())));
         view.update(cx, |view, cx| {
             view.menu.page = Some(crate::menu::Page::Menu);
-            view.begin_selection(at(0.), cx);
+            view.begin_selection(at(0.), 1, cx);
             assert!(view.selection.is_none());
             assert!(!view.extend_selection(at(6.), cx));
             assert!(!view.release_selection(cx));
@@ -576,5 +583,46 @@ mod tests {
             Some("copied".into())
         );
         view.read_with(cx, |view, _| assert!(view.flash.is_some()));
+    }
+
+    /// A double click copies the word under it and a triple click its row,
+    /// through the same release that copies a drag.
+    #[gpui::test]
+    fn double_and_triple_clicks_copy_the_word_and_the_row(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            let mut frame = surface(&["cat src/lib.rs now", "next"], 20);
+            let snapshot = view.live.snapshot.as_ref().unwrap();
+            frame.boot_id = snapshot.boot_id.clone();
+            frame.projection_revision = snapshot.revision;
+            view.live.surface = Some(Arc::new(frame));
+            view
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        let (origin, cell) = view.read_with(cx, |view, _| {
+            (
+                view.bounds.origin,
+                (view.cell_width, view.config.terminal.line_height()),
+            )
+        });
+        let position = origin + point(px(6.5 * cell.0), px(0.5 * cell.1));
+        let clipboard = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        };
+        for (click_count, expected) in [(2, "src/lib.rs"), (3, "cat src/lib.rs now")] {
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+                click_count,
+                first_mouse: false,
+            });
+            cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+            assert_eq!(clipboard(cx), Some(expected.into()));
+            view.read_with(cx, |view, _| assert!(view.selection.is_none()));
+        }
     }
 }

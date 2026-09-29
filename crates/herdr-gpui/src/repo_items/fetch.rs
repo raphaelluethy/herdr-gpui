@@ -2,11 +2,16 @@
 //! request's head branch reachable before a checkout is asked for. Every step
 //! has a deadline and runs off the UI thread.
 
-use super::{Item, Kind, Origin, model::LIMIT, model::parse};
+use super::{
+    Item, Kind,
+    model::{LIMIT, parse, parse_gitlab},
+};
 use crate::{
     Error,
+    forge::{Access, Forges, Remote, Variable, gitlab::Client},
     pull_request::{Input, local_checkout, local_repository, run},
 };
+use std::path::Path;
 use std::{
     process::Command,
     time::{Duration, Instant},
@@ -28,24 +33,33 @@ const QUERY: &str = r#"query($owner: String!, $repo: String!, $count: Int!) {
   }
 }"#;
 
-/// The repository's open pull requests and issues, most recently updated first.
+/// The repository's open pull requests (merge requests, on GitLab) and
+/// issues, most recently updated first.
 pub(super) fn list(
     input: &Input,
-    token: &secrecy::SecretString,
+    forges: &Forges,
     cancelled: impl Fn() -> bool,
     cooldown: &mut Option<Duration>,
-) -> crate::Result<(Origin, Vec<Item>)> {
+) -> crate::Result<(Remote, Vec<Item>)> {
     let deadline = Instant::now() + TIMEOUT;
-    let (owner, repo) = local_repository(input, deadline, &cancelled)?;
-    let origin = Origin { owner, repo };
+    let origin = local_repository(input, forges, deadline, &cancelled)?;
+    let access = forges.access(&origin)?;
+    if let Access::Glab(program) = access {
+        let items = gitlab(program, &origin, deadline, &cancelled, cooldown)?;
+        return Ok((origin, items));
+    }
     let timeout = deadline
         .checked_duration_since(Instant::now())
         .ok_or(Error::PrTimeout)?;
-    let response = crate::github::graphql(
+    let response = crate::forge::graphql(
         "repo_items",
-        token,
+        access,
         QUERY,
-        serde_json::json!({"owner": origin.owner, "repo": origin.repo, "count": LIMIT}),
+        &[
+            ("owner", Variable::Text(origin.owner())),
+            ("repo", Variable::Text(origin.name())),
+            ("count", Variable::Int(LIMIT as u64)),
+        ],
         timeout,
         cancelled,
         cooldown,
@@ -55,7 +69,40 @@ pub(super) fn list(
     Ok((origin, items))
 }
 
-/// Fetch the PR's head from origin, including GitHub's published fork PR refs.
+fn gitlab(
+    program: &Path,
+    origin: &Remote,
+    deadline: Instant,
+    cancelled: &impl Fn() -> bool,
+    cooldown: &mut Option<Duration>,
+) -> crate::Result<Vec<Item>> {
+    let client = Client {
+        program,
+        host: &origin.host,
+    };
+    let project = client.project(origin, deadline, cancelled, cooldown)?;
+    let mut items = Vec::new();
+    for (kind, context, path) in [
+        (Kind::PullRequest, "gitlab_merge_requests", "merge_requests"),
+        (Kind::Issue, "gitlab_issues", "issues"),
+    ] {
+        let listing = client.get(
+            context,
+            &format!(
+                "projects/{}/{path}?state=opened&order_by=updated_at&sort=desc&per_page={LIMIT}",
+                project.id
+            ),
+            deadline,
+            cancelled,
+            cooldown,
+        )?;
+        items.extend(parse_gitlab(&listing, &project, kind)?);
+    }
+    Ok(items)
+}
+
+/// Fetch the PR's head from origin, including GitHub's published fork PR refs
+/// and GitLab's merge request refs.
 /// Existing local branches are never moved by this fetch.
 pub(super) fn fetch_branch(
     input: &Input,

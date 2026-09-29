@@ -563,6 +563,100 @@ fn agent_icons_follow_names_and_reserve_narrow_label_width(cx: &mut gpui::TestAp
     }
 }
 
+/// The daemon's `state_text` token shows a status word beside each agent, in
+/// every layout, and nothing at all when the daemon's rows do not ask for it.
+/// An agent's own `rows_by_agent` entry decides for it instead of `rows`.
+#[gpui::test]
+fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppContext) {
+    use crate::config::{AgentStatusText, Density, LayoutMode};
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        view.live.snapshot = Some(Arc::new(snapshot(2)));
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    // The fixture's agents are Claude.
+    let settings = [
+        (AgentStatusText::default(), false),
+        (AgentStatusText::from_rows(true, []), true),
+        (AgentStatusText::from_rows(false, [("claude", true)]), true),
+        (AgentStatusText::from_rows(true, [("claude", false)]), false),
+        (AgentStatusText::from_rows(false, [("codex", true)]), false),
+    ];
+    for mode in [
+        LayoutMode::from(Density::Comfortable),
+        LayoutMode::Superset,
+        LayoutMode::Orca,
+        LayoutMode::Minimal,
+    ] {
+        for (setting, shown) in &settings {
+            view.update(cx, |view, cx| {
+                view.config.layout.mode = mode;
+                view.config.sidebar.size = 12.;
+                view.sidebar_width = Some(320.);
+                view.config.agent_status_text = setting.clone();
+                cx.notify();
+            });
+            let rendered = cx.update(|window, cx| {
+                cx.default_global::<TextProbes>().0.clear();
+                full_draw(window, cx).clear(cx);
+                cx.global::<TextProbes>()
+                    .0
+                    .get("working")
+                    .map(|(_, text, _)| text.clone())
+            });
+            assert_eq!(
+                cx.debug_bounds("status-agent-p0").is_some(),
+                *shown,
+                "{mode:?} {setting:?}"
+            );
+            assert_eq!(
+                rendered.as_deref(),
+                shown.then_some("working"),
+                "{mode:?} {setting:?}"
+            );
+        }
+    }
+}
+
+/// A sidebar too narrow for the status word clips it within the row rather
+/// than letting it paint past the row's edge onto the terminal.
+#[gpui::test]
+fn agent_status_words_stay_inside_narrow_rows(cx: &mut gpui::TestAppContext) {
+    use crate::config::{AgentStatusText, Density, LayoutMode};
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        view.live.snapshot = Some(Arc::new(snapshot(2)));
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    for density in [Density::Compact, Density::Normal, Density::Comfortable] {
+        for (width, font) in [(160., 12.), (160., 36.), (160., 48.), (240., 48.)] {
+            view.update(cx, |view, cx| {
+                view.config.layout.mode = LayoutMode::from(density);
+                view.config.sidebar.size = font;
+                view.sidebar_width = Some(width);
+                view.config.agent_status_text = AgentStatusText::from_rows(true, []);
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                cx.default_global::<TextProbes>().0.clear();
+                full_draw(window, cx).clear(cx);
+            });
+            let sidebar = cx.debug_bounds("sidebar").unwrap();
+            for key in ["status-agent-p0", "status-agent-p1"] {
+                let status = cx.debug_bounds(key).unwrap();
+                assert!(
+                    status.right() <= sidebar.right(),
+                    "{density:?} {width} {font}: {key} {status:?} past {sidebar:?}"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 /// Every layout keeps its text inside the box it was measured for and its
 /// rows inside the sidebar, and marks the focused row.
@@ -1075,6 +1169,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         sidebar_width: None,
         sidebar_drag: None,
         workspace_drag: None,
+        tab_drag: None,
         sidebar_split: None,
         sidebar_split_modified: false,
         sidebar_preferences: None,
@@ -1096,6 +1191,10 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         _sidebar_invalidation: HerdrWindow::invalidate_sidebar(cx),
         browser: crate::browser::Browser::new(cx),
         _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
+        prefix_armed: false,
+        _prefix_interceptor: HerdrWindow::intercept_prefix(window, cx),
+        deliveries: Default::default(),
+        review: crate::review::Review::new(cx),
     }
 }
 
@@ -3907,7 +4006,7 @@ fn holding_a_workspace_row_lifts_it_and_a_release_picks_the_gap(cx: &mut gpui::T
     let first_column = cx.debug_bounds("column-herdr").unwrap();
     cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_up(first.center(), MouseButton::Left, Modifiers::default());
-    cx.executor().advance_clock(super::reorder::LIFT_DELAY * 2);
+    cx.executor().advance_clock(crate::reorder::LIFT_DELAY * 2);
     cx.run_until_parked();
     view.read_with(cx, |view, _| assert!(view.workspace_drag.is_none()));
 
@@ -3916,7 +4015,7 @@ fn holding_a_workspace_row_lifts_it_and_a_release_picks_the_gap(cx: &mut gpui::T
     view.read_with(cx, |view, _| {
         assert!(!view.workspace_drag.as_ref().unwrap().lifted)
     });
-    cx.executor().advance_clock(super::reorder::LIFT_DELAY);
+    cx.executor().advance_clock(crate::reorder::LIFT_DELAY);
     cx.run_until_parked();
     cx.update(|window, cx| full_draw(window, cx).clear(cx));
     view.read_with(cx, |view, _| {
@@ -4021,7 +4120,7 @@ fn check_row_drag(style: crate::config::LayoutMode, cx: &mut gpui::TestAppContex
     let first = cx.debug_bounds("row-herdr").unwrap();
     let second = cx.debug_bounds(passed).unwrap();
     cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::default());
-    cx.executor().advance_clock(super::reorder::LIFT_DELAY);
+    cx.executor().advance_clock(crate::reorder::LIFT_DELAY);
     cx.run_until_parked();
     let below = point(first.center().x, second.bottom() - px(2.));
     for _ in 0..2 {

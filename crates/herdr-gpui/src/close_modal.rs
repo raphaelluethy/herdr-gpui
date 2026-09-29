@@ -4,7 +4,10 @@ use crate::{
     menu::Page,
 };
 use gpui::{prelude::*, *};
-use herdr_client::{Method, protocol::ClientShellSnapshot};
+use herdr_client::{
+    Method,
+    protocol::{AgentStatus, ClientShellSnapshot},
+};
 use serde_json::{Value, json};
 
 pub(super) struct CloseConfirmation {
@@ -75,6 +78,24 @@ impl CloseConfirmation {
         })
     }
 
+    /// Whether closing this target could interrupt an agent mid-task: one
+    /// working, or blocked on a prompt. Idle, done, and unknown agents, and
+    /// tabs without any, have nothing in flight to lose. Pane closes always
+    /// ask, so this only matters for tabs.
+    fn interrupts_agent(&self, snapshot: &ClientShellSnapshot) -> bool {
+        let busy = |status| matches!(status, AgentStatus::Working | AgentStatus::Blocked);
+        // The tab's aggregate status may rank a finished agent above a
+        // working one, so each agent in the tab is checked as well.
+        snapshot
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == self.tab && busy(tab.agent_status))
+            || snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.tab_id == self.tab && busy(agent.agent_status))
+    }
+
     fn request(&self, snapshot: &ClientShellSnapshot) -> Result<(Method, Value)> {
         if snapshot.boot_id != self.boot
             || !snapshot
@@ -105,22 +126,12 @@ impl CloseConfirmation {
 
 impl HerdrWindow {
     pub(super) fn open_tab_close(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(close) = self
+        let close = self
             .live
             .snapshot
             .as_ref()
-            .and_then(|snapshot| CloseConfirmation::capture_tab(snapshot, id))
-        else {
-            return;
-        };
-        if !self.open_menu(window, cx) {
-            return;
-        }
-        self.menu.close = Some(close);
-        self.menu.page = Some(Page::ConfirmClose);
-        if !self.config.confirm_close_tab {
-            self.confirm_close(window, cx);
-        }
+            .and_then(|snapshot| CloseConfirmation::capture_tab(snapshot, id));
+        self.show_close(close, window, cx);
     }
 
     pub(super) fn open_close_confirmation(
@@ -129,20 +140,40 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(close) = self
+        let close = self
             .live
             .snapshot
             .as_ref()
-            .and_then(|snapshot| CloseConfirmation::capture(command, snapshot))
-        else {
+            .and_then(|snapshot| CloseConfirmation::capture(command, snapshot));
+        self.show_close(close, window, cx);
+    }
+
+    /// Opens the confirmation, or closes a tab straight away when it has no
+    /// agent mid-task or confirmation is turned off. The immediate close still
+    /// goes through `confirm_close`, so its connection and target checks hold
+    /// and a refusal stays visible in the dialog.
+    fn show_close(
+        &mut self,
+        close: Option<CloseConfirmation>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(close) = close else {
             return;
         };
+        let immediate = close.pane.is_none()
+            && (!self.config.confirm_close_tab
+                || !self
+                    .live
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| close.interrupts_agent(snapshot)));
         if !self.open_menu(window, cx) {
             return;
         }
         self.menu.close = Some(close);
         self.menu.page = Some(Page::ConfirmClose);
-        if command == Command::CloseTab && !self.config.confirm_close_tab {
+        if immediate {
             self.confirm_close(window, cx);
         }
     }
@@ -292,11 +323,16 @@ mod tests {
             .unwrap();
             // No status dots, so both tabs fit the narrow strip and the new
             // tab button still follows the last one rather than scrolling.
-            snapshot.tabs[0].agent_status = herdr_client::protocol::AgentStatus::Unknown;
+            snapshot.tabs[0].agent_status = AgentStatus::Unknown;
             let mut tab = snapshot.tabs[0].clone();
             tab.tab_id = "inactive".into();
             tab.focused = false;
             snapshot.tabs.push(tab);
+            // A blocked agent in the inactive tab keeps its close behind the
+            // confirmation this test exercises.
+            let mut agent = snapshot.agents[0].clone();
+            agent.tab_id = "inactive".into();
+            snapshot.agents.push(agent);
             view.live.snapshot = Some(Arc::new(snapshot));
             view
         });
@@ -374,6 +410,70 @@ mod tests {
             assert!(view.read_with(cx, |view, _| view.menu.page.is_none()));
             cx.update(|window, cx| window.draw(cx).clear(cx));
         }
+    }
+
+    #[test]
+    fn only_a_working_or_blocked_agent_holds_a_tab_close() -> anyhow::Result<()> {
+        let mut snapshot: ClientShellSnapshot = serde_json::from_str(include_str!(
+            "../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"
+        ))?;
+        let close = CloseConfirmation::capture_tab(&snapshot, "w1:t1")
+            .ok_or_else(|| anyhow::anyhow!("missing tab"))?;
+        use AgentStatus::*;
+        for (tab, agent, expected) in [
+            (Working, Idle, true),
+            (Blocked, Idle, true),
+            // A finished agent can outrank a working one in the tab's status.
+            (Done, Working, true),
+            (Idle, Blocked, true),
+            (Idle, Idle, false),
+            (Done, Done, false),
+            (Unknown, Unknown, false),
+        ] {
+            snapshot.tabs[0].agent_status = tab;
+            snapshot.agents[0].agent_status = agent;
+            assert_eq!(
+                close.interrupts_agent(&snapshot),
+                expected,
+                "{tab:?} {agent:?}"
+            );
+        }
+        // A working agent in another tab does not hold this one.
+        snapshot.agents[0].agent_status = Working;
+        snapshot.agents[0].tab_id = "w1:t2".into();
+        assert!(!close.interrupts_agent(&snapshot));
+        snapshot.agents.clear();
+        assert!(!close.interrupts_agent(&snapshot));
+        Ok(())
+    }
+
+    #[gpui::test]
+    fn idle_tab_closes_without_asking_but_panes_still_ask(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            let mut snapshot: ClientShellSnapshot = serde_json::from_str(include_str!(
+                "../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"
+            ))
+            .unwrap();
+            snapshot.tabs[0].agent_status = AgentStatus::Idle;
+            snapshot.agents[0].agent_status = AgentStatus::Done;
+            view.live.snapshot = Some(Arc::new(snapshot));
+            view
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.config.confirm_close_tab);
+                view.open_tab_close("w1:t1", window, cx);
+                // The disconnected fixture attempts the close at once and refuses it.
+                assert!(view.menu.close.as_ref().unwrap().error.is_some());
+                view.dismiss_menu(window, cx);
+                view.open_close_confirmation(Command::CloseTab, window, cx);
+                assert!(view.menu.close.as_ref().unwrap().error.is_some());
+                view.dismiss_menu(window, cx);
+                view.open_close_confirmation(Command::ClosePane, window, cx);
+                assert!(view.menu.close.as_ref().unwrap().error.is_none());
+            })
+        });
     }
 
     #[test]

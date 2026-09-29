@@ -4,6 +4,7 @@
 //! workspace and carries out what they imply, such as focusing the Herdr tab
 //! a group asks for.
 use super::tab_appear::{Leaving, Listed};
+use super::tab_scroll::Thumb;
 use super::{
     Location, Scope, Tab, TabId,
     groups::{GroupId, Layout, Pick, Shown, Slot},
@@ -135,11 +136,49 @@ impl HerdrWindow {
     /// out of a strip no longer drawn.
     pub(crate) fn forget_gone_strips(&mut self) {
         let layouts = &self.browser.layouts;
-        self.browser.appear.retain(|group| {
+        let live = |group| {
             layouts
                 .values()
                 .any(|layout| layout.slots().any(|slot| slot.id == group))
-        });
+        };
+        self.browser.appear.retain(live);
+        // The group drawn before any workspace has a layout keeps its strip.
+        let fallback = self.browser.fallback_group;
+        self.browser
+            .tab_scroll
+            .retain(|group| group == fallback || live(group));
+    }
+
+    /// What tracks `group`'s strip's sideways scroll.
+    pub(crate) fn strip_scroll(&mut self, group: GroupId) -> ScrollHandle {
+        self.browser.tab_scroll.handle(group)
+    }
+
+    /// Brings `group`'s chosen tab, at `index` in its strip, into view when
+    /// the choice changes or while the tab grows in. Whether the strip needs
+    /// another frame to do it.
+    pub(crate) fn reveal_tab(&mut self, group: GroupId, pick: &Pick, index: usize) -> bool {
+        let growing = self
+            .browser
+            .appear
+            .growth(group, pick, Instant::now())
+            .is_some();
+        self.browser.tab_scroll.reveal(group, pick, index, growing)
+    }
+
+    /// The thumb `group`'s strip draws, when its tabs outgrow it.
+    pub(crate) fn strip_thumb(&self, group: GroupId) -> Option<Thumb> {
+        self.browser.tab_scroll.thumb(group)
+    }
+
+    /// Takes hold of `group`'s strip thumb with the pointer at `x`.
+    pub(crate) fn grab_strip_thumb(&mut self, group: GroupId, x: Pixels) {
+        self.browser.tab_scroll.grab(group, x);
+    }
+
+    /// Drags `group`'s strip thumb to the pointer at `x`; whether it moved.
+    pub(crate) fn drag_strip_thumb(&mut self, group: GroupId, x: Pixels) -> bool {
+        self.browser.tab_scroll.drag(group, x)
     }
 
     /// The focused workspace's browser tabs and the labels their strips

@@ -16,8 +16,10 @@ mod input;
 mod lifecycle;
 mod mouse;
 mod pending_input;
+mod prefix;
 mod render;
 mod selection;
+mod tab_drag;
 mod tab_strip;
 mod toasts;
 mod transfers;
@@ -134,6 +136,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) sidebar_drag: Option<sidebar::SidebarDrag>,
     /// A press on a workspace row that may lift it for reordering.
     pub(crate) workspace_drag: Option<sidebar::WorkspaceDrag>,
+    /// A press on a tab that may lift it for reordering.
+    pub(crate) tab_drag: Option<tab_drag::TabDrag>,
     pub(crate) sidebar_split: Option<f32>,
     pub(crate) sidebar_split_modified: bool,
     pub(crate) sidebar_preferences: Option<preferences::Preferences>,
@@ -160,6 +164,13 @@ pub(crate) struct HerdrWindow {
     /// Browser tabs this window shows, and its pages for them.
     pub(crate) browser: crate::browser::Browser,
     pub(crate) _browser_tabs: Subscription,
+    /// The daemon's prefix was typed, so the next keystroke completes a chord.
+    pub(crate) prefix_armed: bool,
+    pub(crate) _prefix_interceptor: Subscription,
+    /// Notes and reviews on their way to an agent's pane.
+    pub(crate) deliveries: crate::agent_delivery::Deliveries,
+    /// The review panel beside the terminal.
+    pub(crate) review: crate::review::Review,
 }
 
 /// See `HerdrWindow::surface_signal`.
@@ -257,6 +268,7 @@ impl HerdrWindow {
         self.reconcile_group_terminals(cx);
         self.save_group_layouts(cx);
         self.poll_browser(window, cx);
+        self.poll_deliveries(cx);
         self.offer_browser_skill(window, cx);
         self.poll_sessions(cx);
         self.flush_scrollbar(cx);
@@ -288,6 +300,9 @@ impl HerdrWindow {
             cx.notify();
         }
         if self.update_git() {
+            cx.notify();
+        }
+        if self.update_review() {
             cx.notify();
         }
         if self.update_usage() {
@@ -434,6 +449,7 @@ impl HerdrWindow {
             sidebar_width: None,
             sidebar_drag: None,
             workspace_drag: None,
+            tab_drag: None,
             sidebar_split: None,
             sidebar_split_modified: false,
             sidebar_preferences: None,
@@ -452,9 +468,14 @@ impl HerdrWindow {
             browser: crate::browser::Browser::new(cx),
             // Another window, or an agent, may open or close a tab.
             _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
+            prefix_armed: false,
+            _prefix_interceptor: Self::intercept_prefix(window, cx),
+            deliveries: Default::default(),
+            review: crate::review::Review::new(cx),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
                 if !this.active {
+                    this.disarm_prefix();
                     this.cancel_terminal_mouse(cx);
                     this.selection = None;
                     this.pressed_terminal_link = None;

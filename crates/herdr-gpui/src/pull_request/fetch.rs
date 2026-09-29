@@ -3,7 +3,10 @@
 //! size-capped and every call has a deadline, so no step can hang the worker.
 
 use super::{Input, Origin, Result, parse_graphql};
-use crate::Error;
+use crate::{
+    Error,
+    forge::{Access, Forges, Remote, Variable},
+};
 #[cfg(unix)]
 use std::os::{fd::OwnedFd, unix::net::UnixStream};
 use std::{
@@ -39,10 +42,11 @@ const QUERY: &str = r#"query($owner: String!, $repo: String!, $branch: String!, 
 const ORIGIN_TTL: Duration = Duration::from_secs(10 * 60);
 const ORIGIN_LIMIT: usize = 64;
 
-/// GitHub repositories resolved on saved hosts, keyed by SSH target and Git
-/// directory. Bounded, and owned by the single PR worker thread.
+/// Origin remote URLs read on saved hosts, keyed by SSH target and Git
+/// directory. Bounded, and owned by the single PR worker thread. The URL, not
+/// its parse, is kept: which forge it names can change with the grants held.
 #[derive(Default)]
-pub(super) struct Origins(Vec<(String, String, Instant, (String, String))>);
+pub(super) struct Origins(Vec<(String, String, Instant, String)>);
 
 impl Origins {
     fn resolve(
@@ -52,48 +56,39 @@ impl Origins {
         now: Instant,
         deadline: Instant,
         cancelled: &impl Fn() -> bool,
-    ) -> crate::Result<(String, String)> {
+    ) -> crate::Result<String> {
         self.0
             .retain(|(_, _, resolved, _)| now.duration_since(*resolved) < ORIGIN_TTL);
-        if let Some((.., repository)) = self
+        if let Some((.., url)) = self
             .0
             .iter()
             .find(|(host, key, ..)| host == target && key == &input.repo_key)
         {
-            return Ok(repository.clone());
+            return Ok(url.clone());
         }
         let timeout = deadline
             .checked_duration_since(now)
             .ok_or(Error::PrTimeout)?;
         // The daemon's branch is trusted as reported: this client cannot run
         // local Git against the host's checkout to re-verify it.
-        let remote = herdr_client::remote_origin_url(target, &input.repo_key, timeout, cancelled)?
+        let url = herdr_client::remote_origin_url(target, &input.repo_key, timeout, cancelled)?
             .ok_or(Error::PrOrigin)?;
-        let repository = crate::avatars::github_repo(&remote).ok_or(Error::PrOrigin)?;
         if self.0.len() == ORIGIN_LIMIT {
             self.0.remove(0);
         }
-        self.0.push((
-            target.to_owned(),
-            input.repo_key.clone(),
-            now,
-            repository.clone(),
-        ));
-        Ok(repository)
+        self.0
+            .push((target.to_owned(), input.repo_key.clone(), now, url.clone()));
+        Ok(url)
     }
 }
 
 #[cfg(test)]
-pub(super) fn fetch(
-    input: &Input,
-    token: &secrecy::SecretString,
-    cancelled: impl Fn() -> bool,
-) -> Result {
+pub(super) fn fetch(input: &Input, forges: &Forges, cancelled: impl Fn() -> bool) -> Result {
     fetch_with_backoff(
         input,
         &Origin::Local,
         &mut Origins::default(),
-        token,
+        forges,
         cancelled,
         &mut None,
     )
@@ -103,16 +98,16 @@ pub(super) fn fetch_with_backoff(
     input: &Input,
     origin: &Origin,
     origins: &mut Origins,
-    token: &secrecy::SecretString,
+    forges: &Forges,
     cancelled: impl Fn() -> bool,
     cooldown: &mut Option<Duration>,
 ) -> Result {
     let deadline = Instant::now() + TIMEOUT;
-    let ((owner, repo), head) = match origin {
+    let (remote, head) = match origin {
         Origin::Local => {
             let checkout = local_checkout(input, deadline, &cancelled)?;
-            let repository = origin_repository(&checkout, deadline, &cancelled)?;
-            let head = upstream_head(&input.branch, |key| {
+            let remote = origin_remote(&checkout, forges, deadline, &cancelled)?;
+            let head = upstream_head(&input.branch, forges, |key| {
                 let value = git(
                     &checkout,
                     &["config", "--default", "", "--get", key],
@@ -121,12 +116,12 @@ pub(super) fn fetch_with_backoff(
                 )?;
                 Ok((!value.is_empty()).then_some(value))
             })?;
-            (repository, head)
+            (remote, head)
         }
         Origin::Ssh(target) => {
-            let repository =
-                origins.resolve(target, input, Instant::now(), deadline, &cancelled)?;
-            let head = upstream_head(&input.branch, |key| {
+            let url = origins.resolve(target, input, Instant::now(), deadline, &cancelled)?;
+            let remote = parse_origin(&url, forges)?;
+            let head = upstream_head(&input.branch, forges, |key| {
                 let timeout = deadline
                     .checked_duration_since(Instant::now())
                     .ok_or(Error::PrTimeout)?;
@@ -138,37 +133,77 @@ pub(super) fn fetch_with_backoff(
                     &cancelled,
                 )?)
             })?;
-            (repository, head)
+            (remote, head)
         }
     };
+    let access = forges.access(&remote)?;
     let branch = head
         .as_ref()
         .map_or(input.branch.as_str(), |head| head.branch.as_str());
-    let timeout = deadline
-        .checked_duration_since(Instant::now())
-        .ok_or(Error::PrTimeout)?;
-    let response = crate::github::graphql(
+    match access {
+        Access::Native(_) | Access::Gh(_) => {
+            let timeout = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(Error::PrTimeout)?;
+            github(
+                &remote,
+                access,
+                branch,
+                head.as_ref(),
+                timeout,
+                cancelled,
+                cooldown,
+            )
+        }
+        Access::Glab(program) => super::gitlab::lookup(
+            program,
+            &remote,
+            branch,
+            head.as_ref(),
+            deadline,
+            &cancelled,
+            cooldown,
+        ),
+    }
+}
+
+fn github(
+    remote: &Remote,
+    access: &Access,
+    branch: &str,
+    head: Option<&Head>,
+    timeout: Duration,
+    cancelled: impl Fn() -> bool,
+    cooldown: &mut Option<Duration>,
+) -> Result {
+    let (owner, repo) = (remote.owner(), remote.name());
+    let response = crate::forge::graphql(
         "pull_request",
-        token,
+        access,
         QUERY,
-        serde_json::json!({"owner":owner,"repo":repo,"branch":branch,"limit":if head.is_some() { 100 } else { 2 }}),
+        &[
+            ("owner", Variable::Text(owner)),
+            ("repo", Variable::Text(repo)),
+            ("branch", Variable::Text(branch)),
+            ("limit", Variable::Int(if head.is_some() { 100 } else { 2 })),
+        ],
         timeout,
         cancelled,
         cooldown,
     )?;
-    parse_graphql(response, &owner, &repo, branch, head.as_ref())
+    parse_graphql(response, owner, repo, branch, head)
 }
 
 /// The remote head configured for this local branch, independent of its local name.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Head {
-    pub owner: String,
-    pub repo: String,
+    pub remote: Remote,
     pub branch: String,
 }
 
 pub(super) fn upstream_head(
     branch: &str,
+    forges: &Forges,
     mut config: impl FnMut(&str) -> crate::Result<Option<String>>,
 ) -> crate::Result<Option<Head>> {
     let remote = config(&format!("branch.{branch}.remote"))?;
@@ -183,42 +218,46 @@ pub(super) fn upstream_head(
         .filter(|branch| !branch.is_empty())
         .ok_or(Error::PrBranch)?;
     let url = config(&format!("remote.{remote}.url"))?.ok_or(Error::PrOrigin)?;
-    let (owner, repo) = crate::avatars::github_repo(&url).ok_or(Error::PrOrigin)?;
     Ok(Some(Head {
-        owner,
-        repo,
+        remote: forges.remote(&url).ok_or(Error::PrOrigin)?,
         branch: branch.to_owned(),
     }))
 }
 
 pub(crate) fn local_repository(
     input: &Input,
+    forges: &Forges,
     deadline: Instant,
     cancelled: &impl Fn() -> bool,
-) -> crate::Result<(String, String)> {
+) -> crate::Result<Remote> {
     let checkout = local_checkout(input, deadline, cancelled)?;
-    origin_repository(&checkout, deadline, cancelled)
+    origin_remote(&checkout, forges, deadline, cancelled)
 }
 
-/// The GitHub owner and repository behind a verified checkout's origin remote.
-pub(crate) fn origin_repository(
+/// The forge repository behind a verified checkout's origin remote.
+pub(crate) fn origin_remote(
     checkout: &str,
+    forges: &Forges,
     deadline: Instant,
     cancelled: &impl Fn() -> bool,
-) -> crate::Result<(String, String)> {
-    let remote = git(
+) -> crate::Result<Remote> {
+    let url = git(
         checkout,
         &["config", "--get", "remote.origin.url"],
         deadline,
         cancelled,
     )?;
-    crate::avatars::github_repo(&remote).ok_or_else(|| {
+    parse_origin(&url, forges)
+}
+
+fn parse_origin(url: &str, forges: &Forges) -> crate::Result<Remote> {
+    forges.remote(url).ok_or_else(|| {
         // An SSH host alias for a second account (`github-work:owner/repo`)
         // is the usual reason; only the host is logged, never credentials.
         tracing::debug!(
             category = "github_origin",
-            host = remote_host(&remote),
-            "Origin remote is not a GitHub.com repository"
+            host = remote_host(url),
+            "Origin remote is not a supported forge repository"
         );
         Error::PrOrigin
     })
@@ -341,6 +380,9 @@ pub(super) fn worktree_checkout(output: &str, branch: &str) -> crate::Result<Str
     Ok(path.into())
 }
 
+/// Run a Git child under the shared process policy: no inherited `GIT_*`
+/// state, no prompts, no stdin, a neutral working directory, and stdout and
+/// stderr merged into one bounded stream.
 pub(crate) fn run(
     command: &mut Command,
     deadline: Instant,
@@ -349,11 +391,7 @@ pub(crate) fn run(
     if cancelled() {
         return Err(Error::PrCancelled);
     }
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
-            command.env_remove(key);
-        }
-    }
+    strip_git_environment(command);
     command
         .current_dir("/")
         .env_remove("GH_REPO")
@@ -365,10 +403,134 @@ pub(crate) fn run(
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null());
-    let (output, mut child) = capture(command)?;
+    let (success, mut streams) = bounded(command, Streams::Merged, deadline, cancelled, spawned)?;
+    let output = streams.pop().unwrap_or_default();
+    String::from_utf8(output)
+        .map(|text| (success, text))
+        .map_err(|error| Error::PrEncoding(error.utf8_error()))
+}
+
+/// A child's exit and its two output streams, read apart so a machine-readable
+/// stdout is never interleaved with diagnostics.
+#[derive(Debug, Default)]
+pub(crate) struct Output {
+    pub success: bool,
+    pub stdout: String,
+    /// At most [`DIAGNOSTIC_LIMIT`] bytes; the rest is drained and dropped.
+    pub stderr: String,
+}
+
+/// Stderr kept for a diagnostic. It is read to the end either way, so a chatty
+/// child cannot block on a full pipe, but only this much is retained.
+pub(crate) const DIAGNOSTIC_LIMIT: usize = 64 * 1024;
+
+/// Run a child whose caller has already set its environment policy, with the
+/// same deadline, cancellation, and output cap as [`run`], but with stdout and
+/// stderr kept apart. `spawned` names a launch failure in the caller's terms.
+pub(crate) fn run_split(
+    command: &mut Command,
+    deadline: Instant,
+    cancelled: &impl Fn() -> bool,
+    spawned: impl FnOnce(std::io::Error) -> Error,
+) -> crate::Result<Output> {
+    if cancelled() {
+        return Err(Error::PrCancelled);
+    }
+    command.stdin(Stdio::null());
+    let (success, mut streams) = bounded(command, Streams::Split, deadline, cancelled, spawned)?;
+    let stderr = streams.pop().unwrap_or_default();
+    let stdout = streams.pop().unwrap_or_default();
+    Ok(Output {
+        success,
+        stdout: String::from_utf8(stdout).map_err(|error| Error::PrEncoding(error.utf8_error()))?,
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+    })
+}
+
+/// `GIT_*` variables can point a child at another repository or change what
+/// it prints, so no child inherits them.
+pub(crate) fn strip_git_environment(command: &mut Command) {
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(key);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Streams {
+    /// Stdout and stderr share one stream, capped at [`OUTPUT_LIMIT`].
+    Merged,
+    /// Stdout capped at [`OUTPUT_LIMIT`], stderr truncated at [`DIAGNOSTIC_LIMIT`].
+    Split,
+}
+
+impl Streams {
+    fn sinks<R>(self, readers: Vec<R>) -> Vec<Sink<R>> {
+        readers
+            .into_iter()
+            .enumerate()
+            .map(|(index, reader)| Sink {
+                reader,
+                bytes: Vec::new(),
+                #[cfg(unix)]
+                eof: false,
+                limit: match (self, index) {
+                    (Self::Split, 1) => Limit::Truncate(DIAGNOSTIC_LIMIT),
+                    _ => Limit::Fail(OUTPUT_LIMIT),
+                },
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Limit {
+    /// Exceeding the bound fails the whole run.
+    Fail(usize),
+    /// Bytes past the bound are read and dropped.
+    Truncate(usize),
+}
+
+impl Limit {
+    fn push(self, bytes: &mut Vec<u8>, chunk: &[u8]) -> crate::Result<()> {
+        match self {
+            Self::Fail(limit) if bytes.len() + chunk.len() > limit => Err(Error::PrSize),
+            Self::Fail(_) => {
+                bytes.extend_from_slice(chunk);
+                Ok(())
+            }
+            Self::Truncate(limit) => {
+                let room = limit.saturating_sub(bytes.len()).min(chunk.len());
+                bytes.extend_from_slice(&chunk[..room]);
+                Ok(())
+            }
+        }
+    }
+}
+
+struct Sink<R> {
+    reader: R,
+    bytes: Vec<u8>,
+    /// Unix polls every stream in turn; Windows reads each to its end on a thread.
+    #[cfg(unix)]
+    eof: bool,
+    limit: Limit,
+}
+
+/// Spawn, read under the deadline, and always reap the exact child created
+/// here, killing it first when reading failed or was cancelled.
+fn bounded(
+    command: &mut Command,
+    streams: Streams,
+    deadline: Instant,
+    cancelled: &impl Fn() -> bool,
+    spawned: impl FnOnce(std::io::Error) -> Error,
+) -> crate::Result<(bool, Vec<Vec<u8>>)> {
+    let (readers, mut child) = capture(command, streams, spawned)?;
     // Command retains Stdio descriptors after spawn; release them so EOF is observable.
     command.stdout(Stdio::null()).stderr(Stdio::null());
-    let result = collect(output, &mut child, deadline, cancelled);
+    let result = collect(streams.sinks(readers), &mut child, deadline, cancelled);
     if result.is_err() {
         let _ = child.kill();
     }
@@ -390,61 +552,84 @@ fn unreadable(source: std::io::Error) -> Error {
     }
 }
 
-/// Merges the child's stdout and stderr into one stream this process can poll.
+fn channel_error(operation: &'static str) -> impl FnOnce(std::io::Error) -> Error {
+    move |source| Error::PrProcess { operation, source }
+}
+
+/// Merged output joins stdout and stderr in one stream this process can poll;
+/// split output gives each its own.
 #[cfg(unix)]
-fn capture(command: &mut Command) -> crate::Result<(UnixStream, Child)> {
-    let (reader, writer) = UnixStream::pair().map_err(|source| Error::PrProcess {
-        operation: "create process output channel",
-        source,
-    })?;
-    reader
-        .set_nonblocking(true)
-        .map_err(|source| Error::PrProcess {
-            operation: "configure process output",
-            source,
-        })?;
-    let error_writer = writer.try_clone().map_err(|source| Error::PrProcess {
-        operation: "configure process errors",
-        source,
-    })?;
+fn capture(
+    command: &mut Command,
+    streams: Streams,
+    spawned: impl FnOnce(std::io::Error) -> Error,
+) -> crate::Result<(Vec<UnixStream>, Child)> {
+    let pair = || -> crate::Result<(UnixStream, UnixStream)> {
+        let (reader, writer) =
+            UnixStream::pair().map_err(channel_error("create process output channel"))?;
+        reader
+            .set_nonblocking(true)
+            .map_err(channel_error("configure process output"))?;
+        Ok((reader, writer))
+    };
+    let (reader, writer) = pair()?;
+    let mut readers = vec![reader];
+    let error_writer = match streams {
+        Streams::Merged => writer
+            .try_clone()
+            .map_err(channel_error("configure process errors"))?,
+        Streams::Split => {
+            let (error_reader, error_writer) = pair()?;
+            readers.push(error_reader);
+            error_writer
+        }
+    };
     command
         .stdout(Stdio::from(OwnedFd::from(writer)))
         .stderr(Stdio::from(OwnedFd::from(error_writer)));
     let child = command.spawn().map_err(spawned)?;
-    Ok((reader, child))
+    Ok((readers, child))
 }
 
-/// Windows cannot hand a socket to a child as its standard streams, so the two
-/// halves of the output join in an anonymous pipe instead.
+/// Windows cannot hand a socket to a child as its standard streams, so output
+/// travels through anonymous pipes instead.
 #[cfg(windows)]
-fn capture(command: &mut Command) -> crate::Result<(std::io::PipeReader, Child)> {
-    let (reader, writer) = std::io::pipe().map_err(|source| Error::PrProcess {
-        operation: "create process output channel",
-        source,
-    })?;
-    let error_writer = writer.try_clone().map_err(|source| Error::PrProcess {
-        operation: "configure process errors",
-        source,
-    })?;
+fn capture(
+    command: &mut Command,
+    streams: Streams,
+    spawned: impl FnOnce(std::io::Error) -> Error,
+) -> crate::Result<(Vec<std::io::PipeReader>, Child)> {
+    let (reader, writer) =
+        std::io::pipe().map_err(channel_error("create process output channel"))?;
+    let mut readers = vec![reader];
+    let error_writer = match streams {
+        Streams::Merged => writer
+            .try_clone()
+            .map_err(channel_error("configure process errors"))?,
+        Streams::Split => {
+            let (error_reader, error_writer) =
+                std::io::pipe().map_err(channel_error("create process error channel"))?;
+            readers.push(error_reader);
+            error_writer
+        }
+    };
     command
         .stdout(Stdio::from(writer))
         .stderr(Stdio::from(error_writer));
     let child = command.spawn().map_err(spawned)?;
-    Ok((reader, child))
+    Ok((readers, child))
 }
 
-/// Reads the merged output under the caller's deadline and cancellation. The
-/// child is only reaped once its output has ended, so nothing is truncated.
+/// Reads every stream under the caller's deadline and cancellation. The child
+/// is only reaped once all of its output has ended, so nothing is truncated.
 #[cfg(unix)]
 fn collect(
-    mut reader: UnixStream,
+    mut sinks: Vec<Sink<UnixStream>>,
     child: &mut Child,
     deadline: Instant,
     cancelled: &impl Fn() -> bool,
-) -> crate::Result<(bool, String)> {
-    let mut output = Vec::new();
+) -> crate::Result<(bool, Vec<Vec<u8>>)> {
     let mut buffer = [0; 8192];
-    let mut eof = false;
     loop {
         if cancelled() {
             return Err(Error::PrCancelled);
@@ -452,65 +637,74 @@ fn collect(
         if Instant::now() >= deadline {
             return Err(Error::PrTimeout);
         }
-        match reader.read(&mut buffer) {
-            Ok(0) => eof = true,
-            Ok(n) => {
-                if output.len() + n > OUTPUT_LIMIT {
-                    return Err(Error::PrSize);
+        let mut progressed = false;
+        for sink in sinks.iter_mut().filter(|sink| !sink.eof) {
+            match sink.reader.read(&mut buffer) {
+                Ok(0) => sink.eof = true,
+                Ok(n) => {
+                    sink.limit.push(&mut sink.bytes, &buffer[..n])?;
+                    progressed = true;
                 }
-                output.extend_from_slice(&buffer[..n]);
-                continue;
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    progressed = true;
+                }
+                Err(source) => return Err(unreadable(source)),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(source) => return Err(unreadable(source)),
         }
-        if let Some(status) = child.try_wait().map_err(|source| Error::PrProcess {
-            operation: "wait for process",
-            source,
-        })? && eof
+        if progressed {
+            continue;
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(channel_error("wait for process"))?
+            && sinks.iter().all(|sink| sink.eof)
         {
-            return String::from_utf8(output)
-                .map(|text| (status.success(), text))
-                .map_err(|error| Error::PrEncoding(error.utf8_error()));
+            return Ok((
+                status.success(),
+                sinks.into_iter().map(|sink| sink.bytes).collect(),
+            ));
         }
         thread::sleep(Duration::from_millis(10));
     }
 }
 
-/// An anonymous pipe on Windows cannot be made nonblocking, so the reads run on
-/// their own thread and the deadline is enforced here. Killing the child closes
-/// the last writer, which ends that thread.
+/// An anonymous pipe on Windows cannot be made nonblocking, so each stream is
+/// read on its own thread and the deadline is enforced here. Killing the child
+/// closes the last writers, which ends those threads.
 #[cfg(windows)]
 fn collect(
-    mut reader: std::io::PipeReader,
+    sinks: Vec<Sink<std::io::PipeReader>>,
     child: &mut Child,
     deadline: Instant,
     cancelled: &impl Fn() -> bool,
-) -> crate::Result<(bool, String)> {
+) -> crate::Result<(bool, Vec<Vec<u8>>)> {
     let (sender, reads) = std::sync::mpsc::channel();
-    thread::Builder::new()
-        .name("herdr-pr-output".into())
-        .spawn(move || {
-            let mut output = Vec::new();
-            let mut buffer = [0; 8192];
-            let result = loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break Ok(output),
-                    Ok(n) => {
-                        if output.len() + n > OUTPUT_LIMIT {
-                            break Err(Error::PrSize);
+    let count = sinks.len();
+    for (index, mut sink) in sinks.into_iter().enumerate() {
+        let sender = sender.clone();
+        thread::Builder::new()
+            .name("herdr-pr-output".into())
+            .spawn(move || {
+                let mut buffer = [0; 8192];
+                let result = loop {
+                    match sink.reader.read(&mut buffer) {
+                        Ok(0) => break Ok(sink.bytes),
+                        Ok(n) => {
+                            if let Err(error) = sink.limit.push(&mut sink.bytes, &buffer[..n]) {
+                                break Err(error);
+                            }
                         }
-                        output.extend_from_slice(&buffer[..n]);
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(source) => break Err(unreadable(source)),
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(source) => break Err(unreadable(source)),
-                }
-            };
-            let _ = sender.send(result);
-        })
-        .map_err(unreadable)?;
-    let mut ended: Option<Vec<u8>> = None;
+                };
+                let _ = sender.send((index, result));
+            })
+            .map_err(unreadable)?;
+    }
+    drop(sender);
+    let mut ended: Vec<Option<Vec<u8>>> = vec![None; count];
     loop {
         if cancelled() {
             return Err(Error::PrCancelled);
@@ -518,23 +712,28 @@ fn collect(
         if Instant::now() >= deadline {
             return Err(Error::PrTimeout);
         }
-        if ended.is_none() {
+        loop {
             match reads.try_recv() {
-                Ok(result) => ended = Some(result?),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Ok((index, result)) => {
+                    if let Some(slot) = ended.get_mut(index) {
+                        *slot = Some(result?);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return Err(unreadable(std::io::Error::other("output reader stopped")));
+                    if ended.iter().any(Option::is_none) {
+                        return Err(unreadable(std::io::Error::other("output reader stopped")));
+                    }
+                    break;
                 }
             }
         }
-        if let Some(status) = child.try_wait().map_err(|source| Error::PrProcess {
-            operation: "wait for process",
-            source,
-        })? && let Some(output) = ended.take()
+        if let Some(status) = child
+            .try_wait()
+            .map_err(channel_error("wait for process"))?
+            && ended.iter().all(Option::is_some)
         {
-            return String::from_utf8(output)
-                .map(|text| (status.success(), text))
-                .map_err(|error| Error::PrEncoding(error.utf8_error()));
+            return Ok((status.success(), ended.into_iter().flatten().collect()));
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -564,7 +763,7 @@ mod origin_tests {
             target.into(),
             "/repo/.git".into(),
             now,
-            ("owner".into(), "repo".into()),
+            "git@github.com:owner/repo.git".into(),
         )]);
         let mut resolve = |key: &str, at: Instant| {
             origins.resolve(target, &input(key), at, deadline.max(at + TIMEOUT), &|| {
@@ -573,7 +772,7 @@ mod origin_tests {
         };
         assert_eq!(
             resolve("/repo/.git", now).unwrap(),
-            ("owner".into(), "repo".into())
+            "git@github.com:owner/repo.git"
         );
         // Another repository on the same host is not a hit.
         assert!(matches!(

@@ -5,7 +5,7 @@
 use crate::{
     Error, Result,
     error::ThemeParseError,
-    keymap::{Binding, Keymap},
+    keymap::{Binding, DaemonKeys, Keymap},
 };
 pub(crate) mod watch;
 use gpui::{Font, FontFallbacks};
@@ -87,6 +87,9 @@ pub struct Config {
     pub appearance: Appearance,
     pub confirm_close_tab: bool,
     pub show_agents: bool,
+    /// Show each agent's status word beside it, following the daemon's
+    /// `[ui.sidebar.agents]` rows when they name the `state_text` token.
+    pub agent_status_text: AgentStatusText,
     /// Plan usage of the selected host's AI services in the status bar.
     pub usage: crate::usage::UsageConfig,
     pub option_as_alt: OptionAsAlt,
@@ -96,6 +99,7 @@ pub struct Config {
     pub terminal: FontConfig,
     pub ui: FontConfig,
     pub github: GitHubConfig,
+    pub gitlab: GitLabConfig,
     pub features: Features,
     pub notifications: NotificationConfig,
     pub clipboard_toast: ClipboardToast,
@@ -498,6 +502,40 @@ pub struct Features {
 pub struct GitHubConfig {
     pub oauth_client_id: Option<String>,
     pub allow_plaintext_credentials: bool,
+    /// Whether an authenticated `gh` can stand in for the native sign-in.
+    pub cli: GitHubCli,
+}
+
+/// When the user's own authenticated GitHub CLI reads and creates pull
+/// requests. Its credential stays with the CLI either way.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitHubCli {
+    /// Use `gh` only when there is no native sign-in.
+    #[default]
+    Auto,
+    /// Use `gh` whenever it is signed in, even over a native sign-in.
+    Prefer,
+    /// Never run `gh`.
+    Off,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitLabConfig {
+    /// Whether an authenticated `glab` serves GitLab origins.
+    pub cli: GitLabCli,
+}
+
+/// GitLab has no native sign-in here, so the CLI is either used or not.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitLabCli {
+    /// Use `glab` for GitLab origins on the hosts it is signed in to.
+    #[default]
+    Auto,
+    /// Never run `glab`.
+    Off,
 }
 
 impl GitHubConfig {
@@ -637,8 +675,10 @@ impl Default for Config {
             dark_theme: None,
             appearance: Appearance::default(),
             github: GitHubConfig::default(),
+            gitlab: GitLabConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
+            agent_status_text: AgentStatusText::default(),
             usage: crate::usage::UsageConfig::default(),
             option_as_alt: OptionAsAlt::default(),
             open_links_in: LinkTarget::default(),
@@ -674,6 +714,7 @@ struct Settings {
     terminal: FontSettings,
     ui: FontSettings,
     github: GitHubConfig,
+    gitlab: GitLabConfig,
     features: Features,
     notifications: NotificationConfig,
     clipboard_toast: ClipboardToastSettings,
@@ -765,25 +806,77 @@ pub(crate) fn daemon_config_path(get: impl Fn(&str) -> Option<std::ffi::OsString
     root.join("herdr/config.toml")
 }
 
+/// What the GUI honors from the daemon's own config.
+#[derive(Clone, Debug, Default)]
+struct Daemon {
+    clipboard_toast: ClipboardToast,
+    keys: DaemonKeys,
+    /// Which agents' daemon rows name the `state_text` token.
+    agent_status_text: AgentStatusText,
+}
+
+/// Which agents the daemon's `[ui.sidebar.agents]` rows give a status word.
+/// The daemon uses an agent's `rows_by_agent` entry instead of `rows`, never
+/// both, so each agent is decided by the list it will actually draw.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentStatusText {
+    /// Whether `rows` names the token: agents without their own entry.
+    rows: bool,
+    /// Per canonical agent id, whether its `rows_by_agent` entry names it.
+    by_agent: std::collections::BTreeMap<String, bool>,
+}
+
+impl AgentStatusText {
+    /// Whether an agent, by the canonical id the daemon reports for it, shows
+    /// its status word.
+    pub fn shown_for(&self, agent: Option<&str>) -> bool {
+        agent
+            .and_then(|agent| self.by_agent.get(agent))
+            .copied()
+            .unwrap_or(self.rows)
+    }
+
+    /// The setting for `rows` plus the given `rows_by_agent` overrides.
+    #[cfg(test)]
+    pub(crate) fn from_rows<'a>(
+        rows: bool,
+        by_agent: impl IntoIterator<Item = (&'a str, bool)>,
+    ) -> Self {
+        Self {
+            rows,
+            by_agent: by_agent
+                .into_iter()
+                .map(|(agent, shown)| (agent.to_owned(), shown))
+                .collect(),
+        }
+    }
+}
+
 /// A config file the GUI does not own can hold anything, including settings
 /// from a newer herdr, so only the keys read here matter and anything
 /// unreadable, oversized, malformed, or unrecognized leaves the defaults alone.
-fn daemon_clipboard_toast(path: &Path) -> ClipboardToast {
-    let mut resolved = ClipboardToast::default();
+fn daemon_settings(path: &Path) -> Daemon {
     if fs::metadata(path).is_ok_and(|data| data.len() > MAX_DAEMON_CONFIG_BYTES) {
-        return resolved;
+        return Daemon::default();
     }
-    let Some(clipboard) = fs::read_to_string(path)
+    let Some(table) = fs::read_to_string(path)
         .ok()
         .and_then(|text| text.parse::<toml::Table>().ok())
-        .and_then(|table| {
-            table
-                .get("ui")?
-                .get("toast")?
-                .get("clipboard")?
-                .as_table()
-                .cloned()
-        })
+    else {
+        return Daemon::default();
+    };
+    Daemon {
+        clipboard_toast: daemon_clipboard_toast(&table),
+        keys: DaemonKeys::from_table(table.get("keys").and_then(toml::Value::as_table)),
+        agent_status_text: daemon_agent_status_text(&table),
+    }
+}
+
+fn daemon_clipboard_toast(table: &toml::Table) -> ClipboardToast {
+    let mut resolved = ClipboardToast::default();
+    let Some(clipboard) = table
+        .get("ui")
+        .and_then(|ui| ui.get("toast")?.get("clipboard")?.as_table())
     else {
         return resolved;
     };
@@ -798,6 +891,52 @@ fn daemon_clipboard_toast(path: &Path) -> ClipboardToast {
         resolved.position = position;
     }
     resolved
+}
+
+/// Which agents the daemon's `[ui.sidebar.agents]` rows give the `state_text`
+/// token. That is the TUI's status word beside each agent, so the GUI shows the
+/// same text instead of only the dot. Rows without it, or a differently shaped
+/// table, leave it off, matching the daemon's default rows.
+fn daemon_agent_status_text(table: &toml::Table) -> AgentStatusText {
+    let Some(agents) = table
+        .get("ui")
+        .and_then(|ui| ui.get("sidebar")?.get("agents")?.as_table())
+    else {
+        return AgentStatusText::default();
+    };
+    AgentStatusText {
+        rows: agents.get("rows").is_some_and(rows_have_state_text),
+        by_agent: agents
+            .get("rows_by_agent")
+            .and_then(toml::Value::as_table)
+            .map(|by_agent| {
+                by_agent
+                    .iter()
+                    .filter(|(_, rows)| rows.is_array())
+                    .map(|(agent, rows)| (agent.clone(), rows_have_state_text(rows)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// One sidebar row list: arrays of tokens, each a plain name or an inline table
+/// with a `token` key. Unknown shapes are ignored rather than treated as a match.
+fn rows_have_state_text(rows: &toml::Value) -> bool {
+    rows.as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            row.as_array().is_some_and(|tokens| {
+                tokens.iter().any(|token| {
+                    token.as_str() == Some("state_text")
+                        || token
+                            .as_table()
+                            .and_then(|token| token.get("token"))
+                            .and_then(toml::Value::as_str)
+                            == Some("state_text")
+                })
+            })
+        })
+    })
 }
 
 fn theme_directories() -> Result<Vec<PathBuf>> {
@@ -879,21 +1018,21 @@ impl Config {
             },
             Err(error) => return Err(Error::from(error).at_path(&local)),
         };
-        Self::parse_layers([DEFAULT_CONFIG, &text], daemon_clipboard_toast(daemon))
+        Self::parse_layers([DEFAULT_CONFIG, &text], &daemon_settings(daemon))
             .map_err(|error| error.at_path(&source))
     }
 
     /// `daemon` is the herdr config whose settings this GUI also honors. It is
     /// read for those keys alone and never written; a missing one is normal.
     fn load_path(path: &Path, daemon: &Path) -> Result<Self> {
-        let base = daemon_clipboard_toast(daemon);
+        let base = daemon_settings(daemon);
         let (_lock, local) = Self::prepare_files(path)?;
         let text =
             fs::read_to_string(&local).map_err(|error| Error::from(error).at_path(&local))?;
         // Validate the override independently so bad types/unknown keys cannot
         // disappear inside the merge. Empty arrays explicitly replace defaults.
-        Self::parse_over(&text, base).map_err(|error| error.at_path(&local))?;
-        Self::parse_layers([DEFAULT_CONFIG, &text], base).map_err(|error| error.at_path(&local))
+        Self::parse_over(&text, &base).map_err(|error| error.at_path(&local))?;
+        Self::parse_layers([DEFAULT_CONFIG, &text], &base).map_err(|error| error.at_path(&local))
     }
 
     /// Serialize migration, defaults refresh, and theme saves across GUI windows
@@ -926,8 +1065,7 @@ impl Config {
         if let Some(text) = legacy {
             // Never replace an old user's file until its exact contents are
             // safely stored in the local file. A conflict needs human resolution.
-            Self::parse_over(text, ClipboardToast::default())
-                .map_err(|error| error.at_path(path))?;
+            Self::parse_over(text, &Daemon::default()).map_err(|error| error.at_path(path))?;
         }
         match fs::read_to_string(&local) {
             Ok(text) if legacy.is_some_and(|legacy| legacy != text) => {
@@ -975,19 +1113,16 @@ impl Config {
     /// tests below read, since loading also consults the daemon's config.
     #[cfg(test)]
     fn parse(text: &str) -> Result<Self> {
-        Self::parse_over(text, ClipboardToast::default())
+        Self::parse_over(text, &Daemon::default())
     }
 
     /// `base` is what the daemon's own config asked for, which every key this
     /// file names overrides.
-    fn parse_over(text: &str, base: ClipboardToast) -> Result<Self> {
+    fn parse_over(text: &str, base: &Daemon) -> Result<Self> {
         Self::parse_layers([text], base)
     }
 
-    fn parse_layers<'a>(
-        texts: impl IntoIterator<Item = &'a str>,
-        base: ClipboardToast,
-    ) -> Result<Self> {
+    fn parse_layers<'a>(texts: impl IntoIterator<Item = &'a str>, base: &Daemon) -> Result<Self> {
         let mut builder = config_loader::Config::builder();
         for text in texts {
             builder = builder.add_source(config_loader::File::from_str(
@@ -1003,16 +1138,18 @@ impl Config {
         let mut config = Self::default();
         settings.github.client_id_with_override(None)?;
         config.github = settings.github;
+        config.gitlab = settings.gitlab;
         config.features = settings.features;
         config.notifications = settings.notifications;
-        config.clipboard_toast = settings.clipboard_toast.resolve(base);
+        config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
+        config.agent_status_text = base.agent_status_text.clone();
         if !settings.layout.sidebar_gap.is_finite()
             || !(0.0..=MAX_SIDEBAR_GAP).contains(&settings.layout.sidebar_gap)
         {
             return Err(Error::InvalidSidebarGap);
         }
         config.layout = settings.layout;
-        config.keybindings = Keymap::with_overrides(&settings.keybindings)?;
+        config.keybindings = Keymap::with_overrides(&settings.keybindings, &base.keys)?;
         if let Some(theme) = settings.theme {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
@@ -1920,6 +2057,77 @@ mod tests {
         Ok(())
     }
 
+    /// The daemon's `state_text` token turns the GUI's status word on for the
+    /// agents whose rows name it: an agent's `rows_by_agent` entry replaces
+    /// `rows` for that agent only. Rows without it, or a file the GUI cannot
+    /// use, leave it off.
+    #[test]
+    fn daemon_sidebar_state_text_turns_agent_status_words_on() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let daemon = temp.0.join("config.toml");
+        // Expected for Claude, Codex, and an agent the daemon did not identify.
+        for (text, expected) in [
+            ("", [false; 3]),
+            ("[ui]\nstatus_indicators = \"dots\"\n", [false; 3]),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]\n",
+                [false; 3],
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"agent\", \"state_text\"], [\"agent\"]]\n",
+                [true; 3],
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[{ token = \"state_text\", dim = true }]]\n",
+                [true; 3],
+            ),
+            (
+                "[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"state_icon\", \"state_text\"]]\n",
+                [true, false, false],
+            ),
+            (
+                "[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"agent\"]]\n",
+                [false; 3],
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_text\"]]\n\
+                 [ui.sidebar.agents.rows_by_agent]\nclaude = [[\"agent\"]]\n",
+                [false, true, true],
+            ),
+            ("not toml", [false; 3]),
+        ] {
+            fs::write(&daemon, text)?;
+            let settings = daemon_settings(&daemon).agent_status_text;
+            assert_eq!(
+                [
+                    settings.shown_for(Some("claude")),
+                    settings.shown_for(Some("codex")),
+                    settings.shown_for(None),
+                ],
+                expected,
+                "{text}"
+            );
+        }
+        let off = AgentStatusText::default();
+        assert_eq!(
+            daemon_settings(&temp.0).agent_status_text,
+            off,
+            "a directory is not a config"
+        );
+        assert_eq!(
+            daemon_settings(&temp.0.join("absent.toml")).agent_status_text,
+            off
+        );
+
+        // Oversized files are skipped rather than parsed on every config load.
+        let mut oversized = "[ui.sidebar.agents]\nrows = [[\"state_text\"]]\n".to_owned();
+        oversized.push_str(&"# pad\n".repeat(MAX_DAEMON_CONFIG_BYTES as usize / 6));
+        assert!(oversized.len() as u64 > MAX_DAEMON_CONFIG_BYTES);
+        fs::write(&daemon, &oversized)?;
+        assert_eq!(daemon_settings(&daemon).agent_status_text, off);
+        Ok(())
+    }
+
     #[test]
     fn clipboard_toast_keys_are_strict() {
         for text in [
@@ -2288,7 +2496,7 @@ mod tests {
             assert_eq!(
                 face.size(&Config::parse_layers(
                     [DEFAULT_CONFIG, &known],
-                    ClipboardToast::default()
+                    &Daemon::default()
                 )?),
                 size
             );
@@ -2439,7 +2647,7 @@ mod tests {
         // They layer over the managed file like any key, and empty ones fail.
         let merged = Config::parse_layers(
             [DEFAULT_CONFIG, "dark_theme = 'Catppuccin Mocha'"],
-            ClipboardToast::default(),
+            &Daemon::default(),
         )?;
         assert_eq!(merged.theme_names()?.dark, "Catppuccin Mocha");
         assert_eq!(merged.theme_names()?.light, "Default");
@@ -2739,8 +2947,7 @@ mod tests {
         let text = fs::read_to_string(&path)?;
         assert!(text.contains("layout = \"orca\""), "{text}");
         assert!(text.contains("# New installs start"), "{text}");
-        let merged =
-            Config::parse_layers([DEFAULT_CONFIG, text.as_str()], ClipboardToast::default())?;
+        let merged = Config::parse_layers([DEFAULT_CONFIG, text.as_str()], &Daemon::default())?;
         assert_eq!(merged.layout.mode, LayoutMode::Orca);
         // A table gets its mode beside the gap, and keeps its comments.
         fs::write(
@@ -2801,8 +3008,7 @@ mod tests {
         let text = fs::read_to_string(&path)?;
         assert!(text.contains("appearance = \"light\""), "{text}");
         assert!(text.contains("# New installs start"), "{text}");
-        let merged =
-            Config::parse_layers([DEFAULT_CONFIG, text.as_str()], ClipboardToast::default())?;
+        let merged = Config::parse_layers([DEFAULT_CONFIG, text.as_str()], &Daemon::default())?;
         assert_eq!(merged.appearance, Appearance::Light);
         assert_eq!(merged.layout.mode, Config::parse(LOCAL_CONFIG)?.layout.mode);
         // An existing value is replaced in place, keeping its comment, and a
@@ -2974,16 +3180,14 @@ mod tests {
         let config = Config::parse(
             "[keybindings]\nnew_workspace = \"cmd-n\"\nnew_tab = [\"cmd-t\", \"ctrl-t\"]\nquit = \"\"",
         )?;
-        assert_eq!(config.keybindings.shortcuts(Command::Workspace), ["cmd-n"]);
-        assert_eq!(
-            config.keybindings.shortcuts(Command::Tab),
-            ["cmd-t", "ctrl-t"]
-        );
-        assert!(config.keybindings.shortcuts(Command::Quit).is_empty());
+        let shortcuts = |command| config.keybindings.shortcuts(command).collect::<Vec<_>>();
+        assert_eq!(shortcuts(Command::Workspace), ["cmd-n"]);
+        assert_eq!(shortcuts(Command::Tab), ["cmd-t", "ctrl-t"]);
+        assert!(shortcuts(Command::Quit).is_empty());
         // The managed defaults document the table without setting it.
         let layered = Config::parse_layers(
             [DEFAULT_CONFIG, "[keybindings]\nthemes = \"cmd-k\""],
-            ClipboardToast::default(),
+            &Daemon::default(),
         )?;
         assert_eq!(layered.keybindings.primary(Command::Themes), "cmd-k");
         assert_eq!(layered.keybindings.primary(Command::Tab), "cmd-t");
@@ -2999,6 +3203,59 @@ mod tests {
         Ok(())
     }
 
+    /// The daemon's `[keys]` reach the GUI keymap under the GUI's own
+    /// `[keybindings]`, and a daemon file the GUI cannot use falls back to
+    /// Herdr's defaults instead of failing the GUI config.
+    #[test]
+    fn daemon_keys_layer_under_gui_keybindings() -> anyhow::Result<()> {
+        use crate::Command;
+        let temp = TempDirectory::new()?;
+        let gui = temp.0.join("config-gpui.toml");
+        let local = gui.with_extension("local.toml");
+        let daemon = temp.0.join("config.toml");
+        let load = || Config::load_path(&gui, &daemon);
+        fs::write(&gui, "")?;
+        let shortcuts = |config: &Config, command| {
+            config
+                .keybindings
+                .shortcuts(command)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+
+        // No daemon file: Herdr's defaults.
+        assert_eq!(shortcuts(&load()?, Command::Tab), ["cmd-t", "ctrl-b c"]);
+
+        fs::write(
+            &daemon,
+            "[keys]\nprefix = \"ctrl+a\"\nsplit_vertical = [\"prefix+v\", \"prefix+\\\\\"]\nswitch_tab = [\"prefix+1..9\", \"alt+1..9\"]\n",
+        )?;
+        let config = load()?;
+        assert_eq!(
+            shortcuts(&config, Command::SplitRight),
+            ["cmd-d", "ctrl-a v", "ctrl-a \\"]
+        );
+        assert_eq!(
+            shortcuts(&config, Command::TabNumber(2)),
+            ["cmd-2", "ctrl-a 2", "alt-2"]
+        );
+        assert!(
+            config
+                .keybindings
+                .bindings()
+                .any(|binding| binding == (Command::TabNumber(2), "alt-2"))
+        );
+
+        // The GUI's own entry replaces the command's list, daemon chords too.
+        fs::write(&local, "[keybindings]\nsplit_right = \"cmd-d\"\n")?;
+        assert_eq!(shortcuts(&load()?, Command::SplitRight), ["cmd-d"]);
+
+        fs::write(&local, "")?;
+        fs::write(&daemon, "[keys\nprefix = ")?;
+        assert_eq!(shortcuts(&load()?, Command::Tab), ["cmd-t", "ctrl-b c"]);
+        Ok(())
+    }
+
     #[test]
     fn features_are_opt_in_per_flag() -> anyhow::Result<()> {
         assert!(!Config::parse("[features]")?.features.sidebar_hover_menu);
@@ -3011,6 +3268,43 @@ mod tests {
                 .features
                 .sidebar_hover_menu
         );
+        Ok(())
+    }
+
+    #[test]
+    fn forge_cli_modes_parse_strictly_and_default_to_auto() -> anyhow::Result<()> {
+        assert_eq!(Config::default().github.cli, GitHubCli::Auto);
+        assert_eq!(Config::parse("")?.github.cli, GitHubCli::Auto);
+        for (text, mode) in [
+            ("auto", GitHubCli::Auto),
+            ("prefer", GitHubCli::Prefer),
+            ("off", GitHubCli::Off),
+        ] {
+            assert_eq!(
+                Config::parse(&format!("[github]\ncli = '{text}'"))?
+                    .github
+                    .cli,
+                mode
+            );
+        }
+        for text in ["[github]\ncli = 'always'", "[github]\ncli = true"] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+        assert_eq!(Config::parse("")?.gitlab.cli, GitLabCli::Auto);
+        assert_eq!(
+            Config::parse("[gitlab]\ncli = 'off'")?.gitlab.cli,
+            GitLabCli::Off
+        );
+        for text in [
+            "[gitlab]\ncli = 'prefer'",
+            "[gitlab]\ntoken = 'not-allowed'",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+        // The shipped example documents the keys without changing the defaults.
+        let example = Config::parse(DEFAULT_CONFIG)?;
+        assert_eq!(example.github.cli, GitHubCli::Auto);
+        assert_eq!(example.gitlab.cli, GitLabCli::Auto);
         Ok(())
     }
 
@@ -3318,7 +3612,7 @@ mod tests {
                 "[terminal]\nfallback = ['first', 'second']",
                 "[terminal]\nfallback = []",
             ],
-            ClipboardToast::default(),
+            &Daemon::default(),
         )?;
         assert_eq!(merged.terminal.fallbacks, Some(vec![]));
         Ok(())

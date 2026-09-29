@@ -11,6 +11,7 @@ use gpui::{prelude::*, *};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Row {
+    Review,
     Commit,
     Push,
     PullRequest,
@@ -19,6 +20,7 @@ pub(super) enum Row {
 impl Row {
     fn icon(self) -> &'static str {
         match self {
+            Self::Review => "icons/split.svg",
             Self::Commit => "icons/pencil.svg",
             Self::Push => "icons/chevron-up.svg",
             Self::PullRequest => "icons/git-branch.svg",
@@ -131,7 +133,7 @@ impl HerdrWindow {
         self.menu.reset();
         self.menu.anchor = anchor;
         self.menu.page = Some(Page::Git);
-        if self.menu.github.connected()
+        if self.has_forge_access()
             && let Some(input) = self.git_input()
         {
             self.sync_pr_scope();
@@ -146,16 +148,14 @@ impl HerdrWindow {
     /// lifecycle it is in. Reading the cache never schedules work.
     pub(crate) fn git_pull_request(&self) -> Option<&crate::pull_request::PullRequest> {
         let input = self.git.tracked()?;
-        self.menu
-            .github
-            .connected()
+        self.has_forge_access()
             .then(|| self.menu.pr_cache.peek(&input.repo_key, &input.branch))
             .flatten()
     }
 
-    /// A GitHub lookup for the focused branch is in flight or about to be.
+    /// A forge lookup for the focused branch is in flight or about to be.
     fn git_pull_request_loading(&self) -> bool {
-        self.menu.github.connected()
+        self.has_forge_access()
             && self
                 .git
                 .tracked()
@@ -174,12 +174,20 @@ impl HerdrWindow {
             return Vec::new();
         }
         vec![
+            (
+                Row::Review,
+                if self.review.open {
+                    "Hide review panel".into()
+                } else {
+                    "Review changes".into()
+                },
+            ),
             (Row::Commit, "Commit...".into()),
             (Row::Push, "Push".into()),
             match self.git_open_pull_request() {
                 Some(pr) => (
                     Row::PullRequest,
-                    format!("Open pull request #{}", pr.number),
+                    format!("Open {} {}", pr.noun(), pr.reference()),
                 ),
                 None => (Row::PullRequest, "Create pull request".into()),
             },
@@ -192,10 +200,16 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if row == Row::Review {
+            self.dismiss_menu(window, cx);
+            self.toggle_review(window, cx);
+            return;
+        }
         if self.git.running().is_some() {
             return;
         }
         match row {
+            Row::Review => {}
             Row::Commit => {
                 self.menu.page = Some(Page::GitCommit);
                 self.menu.input = Some(DialogInput::default());
@@ -214,13 +228,9 @@ impl HerdrWindow {
     }
 
     fn start_git(&mut self, action: Action) {
-        let token = self
-            .menu
-            .github
-            .profile
-            .as_ref()
-            .map(|profile| profile.token.clone());
-        if let Err(error) = self.git.start(action, token) {
+        let forges = self.forges();
+        let forges = (!forges.is_empty()).then_some(forges);
+        if let Err(error) = self.git.start(action, forges) {
             self.menu.error = Some(error.to_string());
         } else {
             self.menu.error = None;
@@ -372,11 +382,7 @@ impl HerdrWindow {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(
-                        div()
-                            .text_color(rgb(pr.color(theme)))
-                            .child(format!("#{}", pr.number)),
-                    )
+                    .child(div().text_color(rgb(pr.color(theme))).child(pr.reference()))
                     .child(
                         div()
                             .px(px(6.))
@@ -387,22 +393,24 @@ impl HerdrWindow {
                             .child(pr.lifecycle()),
                     )
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .debug_selector(|| "git-menu-pr-counts".into())
-                            .flex()
-                            .child(
-                                div()
-                                    .text_color(rgb(theme.palette[2]))
-                                    .child(format!("+{}", crate::sidebar::compact(pr.additions))),
-                            )
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .text_color(rgb(theme.palette[1]))
-                                    .child(format!("-{}", crate::sidebar::compact(pr.deletions))),
-                            ),
-                    ),
+                    .when_some(pr.line_counts(), |row, (additions, deletions)| {
+                        row.child(
+                            div()
+                                .debug_selector(|| "git-menu-pr-counts".into())
+                                .flex()
+                                .child(
+                                    div()
+                                        .text_color(rgb(theme.palette[2]))
+                                        .child(format!("+{}", crate::sidebar::compact(additions))),
+                                )
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .text_color(rgb(theme.palette[1]))
+                                        .child(format!("-{}", crate::sidebar::compact(deletions))),
+                                ),
+                        )
+                    }),
             );
             panel = panel.child(self.render_git_summary());
             if pr.state == PrState::Open {
@@ -889,9 +897,10 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.git = crate::git::Git::fixture(input.clone(), status(0, 0, 0));
                 view.menu.github = crate::github::Auth::connected_fixture();
+                let forges = view.forges();
                 view.menu.pr_cache.scope(
                     (0, 1, "boot".into()),
-                    Arc::new("fixture".into()),
+                    forges,
                     crate::pull_request::Origin::Local,
                 );
                 view.menu
@@ -977,7 +986,20 @@ mod tests {
                     .into_iter()
                     .map(|(_, label)| label)
                     .collect();
-                assert_eq!(rows, ["Commit...", "Push", "Create pull request"]);
+                assert_eq!(
+                    rows,
+                    ["Review changes", "Commit...", "Push", "Create pull request"]
+                );
+                // The review row opens the panel and closes the popup; it
+                // does not need Git to be idle.
+                view.activate_git_row(Row::Review, window, cx);
+                assert!(view.review.open);
+                assert_eq!(view.menu.page, None);
+                view.open_git_menu(point(px(900.), px(20.)), window, cx);
+                assert_eq!(
+                    view.git_rows().first().map(|(_, label)| label.clone()),
+                    Some("Hide review panel".into())
+                );
                 view.activate_git_row(Row::Commit, window, cx);
                 assert_eq!(view.menu.page, Some(Page::GitCommit));
                 assert!(view.menu.input.is_some(), "the dialog opens with a field");

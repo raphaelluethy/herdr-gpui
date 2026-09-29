@@ -12,28 +12,19 @@ pub(super) const ANNOTATIONS_WIDTH: f32 = 300.;
 
 use crate::{
     HerdrWindow,
-    connection::ConnectionBridge,
+    agent_delivery::{Delivery, Fallback, agent},
     motion::{self, ENTER, Toggle},
     search_input::SearchInput,
-    terminal::InputTarget,
     window::Flash,
 };
 use gpui::{prelude::*, *};
-use herdr_client::protocol::{
-    AgentStatus, ClientKeyCode, ClientKeyKind, ClientPaneInputEvent, ClientShellSnapshot,
-};
+use herdr_client::protocol::ClientShellSnapshot;
 use std::{
     collections::HashMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
-
-/// How long a batch waits for a busy agent before it is pasted anyway, or,
-/// when the agent is asking a question, kept for `browser feedback`.
-const HOLD: Duration = Duration::from_secs(120);
-/// Lets the agent's input take the paste before Enter submits it.
-const SUBMIT_DELAY: Duration = Duration::from_millis(150);
 
 /// Screenshots older than this are removed when the next ones are saved.
 const SCREENSHOT_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -56,14 +47,6 @@ struct TabNotes {
     notes: Vec<Note>,
 }
 
-/// Notes on the way to an agent's pane, waiting for it to be idle.
-struct Delivery {
-    pane_id: String,
-    boot_id: String,
-    text: String,
-    until: Instant,
-}
-
 pub(crate) struct Annotations {
     tabs: HashMap<TabId, TabNotes>,
     /// Each tab's notes panel, sliding open and closed beside its page.
@@ -72,7 +55,6 @@ pub(crate) struct Annotations {
     /// list; `None` for a note that is whole.
     drawn: HashMap<TabId, Vec<Option<Instant>>>,
     pub(super) input: Entity<SearchInput>,
-    deliveries: Vec<Delivery>,
     /// Numbers screenshots, to match each to its draft or note.
     captures: u64,
 }
@@ -89,7 +71,6 @@ impl Annotations {
             panels: HashMap::new(),
             drawn: HashMap::new(),
             input,
-            deliveries: Vec::new(),
             captures: 0,
         }
     }
@@ -112,11 +93,6 @@ impl Annotations {
     #[cfg(test)]
     pub(super) fn queued(&self, id: TabId) -> usize {
         self.tabs.get(&id).map_or(0, |tab| tab.notes.len())
-    }
-
-    #[cfg(test)]
-    pub(super) fn delivering(&self) -> usize {
-        self.deliveries.len()
     }
 
     pub(crate) fn forget(&mut self, id: TabId) {
@@ -172,17 +148,6 @@ impl Annotations {
                 .flatten()
                 .any(|since| motion::progress(*since, now, ENTER).is_some())
     }
-}
-
-/// The agent in `pane_id` and what it is doing, if Herdr sees one there.
-fn agent<'a>(
-    snapshot: &'a ClientShellSnapshot,
-    pane_id: &str,
-) -> Option<&'a herdr_client::protocol::ClientShellAgent> {
-    snapshot
-        .agents
-        .iter()
-        .find(|agent| agent.pane_id == pane_id)
 }
 
 /// Writes the notes' screenshots where the agent can read them, returning
@@ -243,20 +208,6 @@ fn save_screenshots_in(
             Ok(Some(path))
         })
         .collect()
-}
-
-fn enter() -> ClientPaneInputEvent {
-    ClientPaneInputEvent::Key {
-        code: ClientKeyCode::Enter,
-        modifiers: 0,
-        kind: ClientKeyKind::Press,
-        repeat_count: 1,
-        shifted_codepoint: None,
-        generated_text: None,
-        tracks_release: false,
-        physical_key_id: None,
-        windows_record: None,
-    }
 }
 
 impl HerdrWindow {
@@ -604,19 +555,16 @@ impl HerdrWindow {
             .origin_pane(tab)
             .filter(|(pane, snapshot)| agent(snapshot, pane).is_some())
         {
-            let busy = agent(snapshot, pane).is_some_and(|agent| {
-                matches!(
-                    agent.agent_status,
-                    AgentStatus::Working | AgentStatus::Blocked
-                )
-            });
-            let delivery = Delivery {
-                pane_id: pane.to_owned(),
-                boot_id: snapshot.boot_id.clone(),
+            let busy = self.pane_readiness(pane).busy();
+            let delivery = Delivery::new(
+                pane.to_owned(),
+                snapshot.boot_id.clone(),
                 text,
-                until: Instant::now() + HOLD,
-            };
-            self.browser.annotations.deliveries.push(delivery);
+                Fallback::Feedback,
+                "notes",
+                Instant::now(),
+            );
+            self.queue_delivery(delivery, cx);
             if busy {
                 Flash::success("Notes will go to the agent once it is idle")
             } else {
@@ -633,107 +581,6 @@ impl HerdrWindow {
             Flash::warning("The agent's pane is not here; notes kept for `browser feedback`")
         };
         self.show_flash(flash, cx);
-    }
-
-    /// Pastes held notes into agents that became idle. Runs every tick.
-    pub(crate) fn poll_deliveries(&mut self, cx: &mut Context<Self>) {
-        if self.browser.annotations.deliveries.is_empty() {
-            return;
-        }
-        let now = Instant::now();
-        let deliveries = std::mem::take(&mut self.browser.annotations.deliveries);
-        for delivery in deliveries {
-            let waiting = cx
-                .try_global::<Feedback>()
-                .is_some_and(|feedback| feedback.is_waiting(&delivery.pane_id));
-            let snapshot = self.live.snapshot.clone();
-            let present = snapshot.as_deref().filter(|snapshot| {
-                snapshot.boot_id == delivery.boot_id
-                    && snapshot
-                        .panes
-                        .iter()
-                        .any(|pane| pane.pane_id == delivery.pane_id)
-            });
-            let status = present
-                .and_then(|snapshot| agent(snapshot, &delivery.pane_id))
-                .map(|agent| agent.agent_status);
-            let busy = matches!(status, Some(AgentStatus::Working | AgentStatus::Blocked));
-            if present.is_some() && !waiting && busy && now < delivery.until {
-                self.browser.annotations.deliveries.push(delivery);
-                continue;
-            }
-            // Only a running agent's prompt is typed into. A pane whose agent
-            // exited is a shell, where Enter would run the pasted text, page
-            // quotes included; an agent asking the user something must not
-            // have its answer typed by a paste. Both fetch the notes instead.
-            let typable = matches!(
-                status,
-                Some(AgentStatus::Idle | AgentStatus::Done | AgentStatus::Working)
-            );
-            if waiting || present.is_none() || !typable {
-                cx.default_global::<Feedback>().keep(Batch {
-                    pane_id: delivery.pane_id,
-                    text: delivery.text,
-                });
-                if !waiting {
-                    self.show_flash(
-                        Flash::warning("The agent is not ready; notes kept for `browser feedback`"),
-                        cx,
-                    );
-                }
-                continue;
-            }
-            self.paste_into_pane(delivery, cx);
-        }
-    }
-
-    fn paste_into_pane(&mut self, delivery: Delivery, cx: &mut Context<Self>) {
-        let target = InputTarget::Pane(delivery.pane_id.clone());
-        let pasted = self.endpoints[self.selected_endpoint]
-            .connection
-            .handle
-            .as_ref()
-            .ok_or(crate::Error::NotConnected)
-            .and_then(|handle| {
-                ConnectionBridge::send_input(
-                    handle,
-                    &delivery.boot_id,
-                    &target,
-                    ClientPaneInputEvent::Paste(delivery.text.clone()),
-                )
-                .map_err(crate::Error::from)
-            });
-        if let Err(error) = pasted {
-            tracing::warn!(%error, "Could not paste notes into the agent's pane");
-            cx.default_global::<Feedback>().keep(Batch {
-                pane_id: delivery.pane_id,
-                text: delivery.text,
-            });
-            self.show_flash(
-                Flash::warning("Could not reach the agent; notes kept for `browser feedback`"),
-                cx,
-            );
-            return;
-        }
-        let timer = cx.background_executor().clone();
-        let boot_id = delivery.boot_id;
-        cx.spawn(async move |this, cx| {
-            timer.timer(SUBMIT_DELAY).await;
-            this.update(cx, |this, _| {
-                let handle = this.endpoints[this.selected_endpoint]
-                    .connection
-                    .handle
-                    .as_ref();
-                if let Some(handle) = handle
-                    && let Err(error) =
-                        ConnectionBridge::send_input(handle, &boot_id, &target, enter())
-                {
-                    tracing::warn!(%error, "Could not submit notes in the agent's pane");
-                }
-            })
-            .ok();
-        })
-        .detach();
     }
 
     /// The notes panel beside the page.

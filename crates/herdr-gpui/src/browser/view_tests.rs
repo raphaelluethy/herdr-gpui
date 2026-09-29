@@ -419,6 +419,71 @@ mod groups {
     }
 }
 
+/// A browser tab is this client's own, so dropping one reorders the
+/// workspace's tabs at once, without a daemon.
+#[gpui::test]
+fn dragging_a_browser_tab_reorders_the_workspace_s_tabs(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+
+    let (view, cx) = window(cx);
+    cx.simulate_resize(gpui::size(px(1600.), px(600.)));
+    let ids = cx.update(|_, cx| {
+        let scope = scope(&view.read(cx).endpoints[0]);
+        (0..3)
+            .map(|_| {
+                Store::update(cx, |store| {
+                    store.open(scope.clone(), "w0", None, None).unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear = Default::default()));
+    draw(cx);
+    draw(cx);
+    let order = |view: &Entity<HerdrWindow>, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            let scope = scope(&view.read(cx).endpoints[0]);
+            cx.global::<Store>()
+                .in_workspace(&scope, "w0")
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>()
+        })
+    };
+    let first = cx.debug_bounds("browser-tab-0").unwrap();
+    let second = cx.debug_bounds("browser-tab-1").unwrap();
+    // Browser tabs move among their own: over the Herdr tab ahead of them,
+    // the first stays first.
+    let herdr = cx.debug_bounds("tab-t0").unwrap();
+    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::default());
+    for _ in 0..2 {
+        cx.simulate_mouse_move(herdr.center(), MouseButton::Left, Modifiers::default());
+        draw(cx);
+    }
+    view.read_with(cx, |view, _| {
+        assert!(!view.tab_drag.as_ref().unwrap().has_target())
+    });
+    let over = point(second.right() - px(2.), first.center().y);
+    for _ in 0..2 {
+        cx.simulate_mouse_move(over, MouseButton::Left, Modifiers::default());
+        draw(cx);
+    }
+    cx.simulate_mouse_up(over, MouseButton::Left, Modifiers::default());
+    draw(cx);
+    view.read_with(cx, |view, _| assert!(view.tab_drag.is_none()));
+    assert_eq!(order(&view, cx), [ids[1], ids[0], ids[2]]);
+    // The release was the drop, not a click showing the tab.
+    view.read_with(cx, |view, _| {
+        assert_ne!(
+            view.group_pick(view.group_slots()[0].id),
+            Some(super::Pick::Page(ids[0]))
+        )
+    });
+    assert_eq!(
+        cx.debug_bounds("browser-tab-1").unwrap().left(),
+        first.left()
+    );
+}
+
 /// Tabs a workspace already has appear at once; one that opens later grows
 /// into the strip.
 #[gpui::test]
@@ -694,16 +759,16 @@ mod notes {
         cx.update(|_, cx| {
             view.update(cx, |view, cx| {
                 view.send_notes(&tab, cx);
-                assert_eq!(view.browser.annotations.delivering(), 1);
+                assert_eq!(view.deliveries.len(), 1);
                 view.poll_deliveries(cx);
-                assert_eq!(view.browser.annotations.delivering(), 1, "held while busy");
+                assert_eq!(view.deliveries.len(), 1, "held while busy");
             });
         });
         assert!(kept(cx).is_none());
         with_agent(&view, cx, "idle");
         cx.update(|_, cx| view.update(cx, |view, cx| view.poll_deliveries(cx)));
         view.read_with(cx, |view, _| {
-            assert_eq!(view.browser.annotations.delivering(), 0);
+            assert_eq!(view.deliveries.len(), 0);
             assert_eq!(view.browser.annotations.queued(tab.id), 0);
         });
         assert!(kept(cx).is_some_and(|text| text.contains("Make it blue")));
@@ -727,7 +792,7 @@ mod notes {
             view.update(cx, |view, cx| {
                 view.send_notes(&tab, cx);
                 view.poll_deliveries(cx);
-                assert_eq!(view.browser.annotations.delivering(), 0);
+                assert_eq!(view.deliveries.len(), 0);
             });
         });
         assert!(kept(cx).is_some_and(|text| text.contains("Make it blue")));
@@ -743,7 +808,7 @@ mod notes {
                 view.send_notes(&tab, cx);
                 // Deadline not reached: still held.
                 view.poll_deliveries(cx);
-                assert_eq!(view.browser.annotations.delivering(), 1);
+                assert_eq!(view.deliveries.len(), 1);
             });
         });
         // The pane closing sends them to `browser feedback` rather than nowhere.
@@ -754,7 +819,7 @@ mod notes {
                 shown.agents.clear();
                 view.live.snapshot = Some(Arc::new(shown));
                 view.poll_deliveries(cx);
-                assert_eq!(view.browser.annotations.delivering(), 0);
+                assert_eq!(view.deliveries.len(), 0);
             });
         });
         assert!(kept(cx).is_some());

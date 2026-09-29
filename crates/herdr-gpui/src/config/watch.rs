@@ -26,14 +26,23 @@ pub(crate) fn fingerprint(path: &Path) -> Fingerprint {
     read().map_err(|error| error.kind())
 }
 
-#[derive(Default)]
-pub(crate) struct Watch {
-    observed: Option<Fingerprint>,
-    accepted: Option<Fingerprint>,
+/// Debounces samples of a file, or of several read together.
+pub(crate) struct Watch<T = Fingerprint> {
+    observed: Option<T>,
+    accepted: Option<T>,
 }
 
-impl Watch {
-    pub(crate) fn observe(&mut self, current: Fingerprint) -> bool {
+impl<T> Default for Watch<T> {
+    fn default() -> Self {
+        Self {
+            observed: None,
+            accepted: None,
+        }
+    }
+}
+
+impl<T: Copy + PartialEq> Watch<T> {
+    pub(crate) fn observe(&mut self, current: T) -> bool {
         let stable = self.observed == Some(current);
         self.observed = Some(current);
         stable && self.accepted != Some(current)
@@ -41,7 +50,7 @@ impl Watch {
 
     /// Acknowledge the sample whose load completed, not a newer edit observed
     /// in the meantime. Cancelled loads must leave their sample pending.
-    pub(crate) fn accept(&mut self, sample: Fingerprint) {
+    pub(crate) fn accept(&mut self, sample: T) {
         self.accepted = Some(sample);
     }
 }
@@ -52,7 +61,7 @@ mod tests {
 
     #[test]
     fn debounces_and_retains_changes_until_accepted() {
-        let mut watch = Watch::default();
+        let mut watch: Watch = Watch::default();
         assert!(!watch.observe(Ok(1)));
         assert!(watch.observe(Ok(1)));
         watch.accept(Ok(1));
@@ -73,7 +82,7 @@ mod tests {
 
     #[test]
     fn a_completed_load_does_not_acknowledge_a_newer_edit() {
-        let mut watch = Watch::default();
+        let mut watch: Watch = Watch::default();
         assert!(!watch.observe(Ok(1)));
         assert!(watch.observe(Ok(1)));
         assert!(!watch.observe(Ok(2)));

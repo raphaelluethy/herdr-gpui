@@ -11,7 +11,10 @@ use super::{
     parse::{parse, parse_graphql},
     run,
 };
-use crate::Error;
+use crate::{
+    Error,
+    forge::{Access, Forges},
+};
 use std::{
     process::Command,
     sync::{Arc, mpsc},
@@ -20,7 +23,7 @@ use std::{
 
 struct Peer {
     cache: Cache,
-    incoming: mpsc::Receiver<(u64, Input, Origin, Arc<secrecy::SecretString>)>,
+    incoming: mpsc::Receiver<(u64, Input, Origin, Forges)>,
     outgoing: mpsc::SyncSender<(u64, Result, Option<Duration>)>,
 }
 
@@ -30,11 +33,7 @@ impl Peer {
         let (outgoing, results) = mpsc::sync_channel(1);
         let mut cache = Cache::default();
         cache.lookup.worker = Some(Worker { requests, results });
-        cache.scope(
-            (0, 1, "boot".into()),
-            Arc::new("fixture".into()),
-            Origin::Local,
-        );
+        cache.scope((0, 1, "boot".into()), native("fixture"), Origin::Local);
         Self {
             cache,
             incoming,
@@ -47,6 +46,13 @@ impl Peer {
         self.outgoing.send((generation, result, cooldown)).unwrap();
         self.cache.poll(now);
         input
+    }
+}
+
+fn native(token: &str) -> Forges {
+    Forges {
+        github: Some(Access::Native(Arc::new(token.into()))),
+        ..Forges::default()
     }
 }
 
@@ -183,18 +189,18 @@ fn cache_prefetches_without_menu_and_refreshes_at_ttl_with_stale_data() {
 #[test]
 fn cache_fences_auth_scope_removed_branch_and_late_results() {
     let now = Instant::now();
-    for change in 0..7 {
+    for change in 0..8 {
         let mut peer = Peer::new();
         peer.cache.seed(input("cached"), fixture().unwrap(), now);
         peer.cache.schedule([input("old")], now);
         peer.cache.poll(now);
         let (generation, _, _, _) = peer.incoming.try_recv().unwrap();
-        let token = peer.cache.token.as_ref().unwrap().clone();
+        let token = peer.cache.forges.as_ref().unwrap().clone();
         match change {
             0 => peer.cache.clear(), // sign-out/disconnect
             1 => peer.cache.scope(
                 (0, 1, "boot".into()),
-                Arc::new("other-account".into()),
+                native("other-account"),
                 Origin::Local,
             ),
             2 => peer
@@ -209,6 +215,15 @@ fn cache_fences_auth_scope_removed_branch_and_late_results() {
             5 => peer
                 .cache
                 .scope((0, 1, "boot".into()), token, Origin::Ssh("host".into())),
+            // Switching from the native account to the user's gh is a new account.
+            6 => peer.cache.scope(
+                (0, 1, "boot".into()),
+                Forges {
+                    github: Some(Access::Gh(std::path::Path::new("/bin/gh").into())),
+                    ..Forges::default()
+                },
+                Origin::Local,
+            ),
             _ => peer.cache.retain(|input| input.branch == "new"),
         }
         assert!(peer.cache.entries.is_empty());
@@ -248,7 +263,7 @@ fn signout_drains_private_results_without_starting_queued_work() {
             .is_err()
     );
     assert!(peer.incoming.try_recv().is_err());
-    assert!(peer.cache.token.is_none());
+    assert!(peer.cache.forges.is_none());
 }
 
 #[test]
@@ -434,7 +449,7 @@ fn response() -> serde_json::Value {
 
 #[test]
 fn upstream_matches_renamed_fork_branch_and_rejects_unrelated_heads() {
-    let head = super::fetch::upstream_head("pr/138", |key| {
+    let head = super::fetch::upstream_head("pr/138", &Forges::default(), |key| {
         Ok(match key {
             "branch.pr/138.remote" => Some("contributor".into()),
             "branch.pr/138.merge" => Some("refs/heads/feat/inline-ime-preedit".into()),
@@ -491,7 +506,7 @@ fn upstream_matches_renamed_fork_branch_and_rejects_unrelated_heads() {
 
 #[test]
 fn no_upstream_preserves_origin_owner_and_local_branch_matching() {
-    let head = super::fetch::upstream_head("feature", |_| Ok(None)).unwrap();
+    let head = super::fetch::upstream_head("feature", &Forges::default(), |_| Ok(None)).unwrap();
     assert!(head.is_none());
     let graphql =
         |nodes| serde_json::json!({"data":{"repository":{"pullRequests":{"nodes":nodes}}}});
@@ -522,7 +537,7 @@ fn no_upstream_preserves_origin_owner_and_local_branch_matching() {
 fn unsupported_upstream_and_config_errors_do_not_fall_back() {
     for merge in ["refs/heads/feature", "refs/pull/138/head"] {
         assert!(
-            super::fetch::upstream_head("feature", |key| Ok(Some(
+            super::fetch::upstream_head("feature", &Forges::default(), |key| Ok(Some(
                 match key {
                     "branch.feature.remote" => "fork",
                     "branch.feature.merge" => merge,
@@ -535,7 +550,7 @@ fn unsupported_upstream_and_config_errors_do_not_fall_back() {
         );
     }
     assert!(matches!(
-        super::fetch::upstream_head("feature", |_| Err(Error::PrCancelled)),
+        super::fetch::upstream_head("feature", &Forges::default(), |_| Err(Error::PrCancelled)),
         Err(Error::PrCancelled)
     ));
 }
@@ -654,11 +669,11 @@ fn worker_discards_stale_results_and_runs_only_requested_jobs() {
         repo_key: "/fixture/.git".into(),
         branch: "feature".into(),
     };
-    lookup.request(input.clone(), Origin::Local, Arc::new("fixture".into()));
+    lookup.request(input.clone(), Origin::Local, native("fixture"));
     lookup.poll();
     let (old, _, _, _) = incoming.try_recv().unwrap();
     lookup.clear();
-    lookup.request(input, Origin::Local, Arc::new("fixture".into()));
+    lookup.request(input, Origin::Local, native("fixture"));
     lookup.poll();
     assert!(incoming.try_recv().is_err(), "single in-flight request");
     outgoing
@@ -818,18 +833,18 @@ fn local_git_verification_rejects_wrong_checkout_branch_and_remote_before_gh() {
         branch: "feature".into(),
     };
     assert!(
-        fetch(&input, &"fixture".into(), || false)
+        fetch(&input, &native("fixture"), || false)
             .unwrap_err()
             .to_string()
-            .contains("GitHub.com origins only")
+            .contains("signed-in GitLab origins only")
     );
     let mut registry_input = input.clone();
     registry_input.checkout = None;
     assert!(
-        fetch(&registry_input, &"fixture".into(), || false)
+        fetch(&registry_input, &native("fixture"), || false)
             .unwrap_err()
             .to_string()
-            .contains("GitHub.com origins only")
+            .contains("signed-in GitLab origins only")
     );
     git(&[
         "config",
@@ -838,33 +853,45 @@ fn local_git_verification_rejects_wrong_checkout_branch_and_remote_before_gh() {
         "https://github.com/example/project.git",
     ]);
     assert_eq!(
-        local_repository(&registry_input, Instant::now() + TIMEOUT, &|| false).unwrap(),
-        ("example".into(), "project".into())
+        local_repository(
+            &registry_input,
+            &Forges::default(),
+            Instant::now() + TIMEOUT,
+            &|| false
+        )
+        .unwrap()
+        .path,
+        "example/project"
     );
     registry_input.branch = "missing".into();
     assert!(
-        local_repository(&registry_input, Instant::now() + TIMEOUT, &|| false)
-            .unwrap_err()
-            .to_string()
-            .contains("No local worktree")
+        local_repository(
+            &registry_input,
+            &Forges::default(),
+            Instant::now() + TIMEOUT,
+            &|| false,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("No local worktree")
     );
     input.branch = "other".into();
     assert!(
-        fetch(&input, &"fixture".into(), || false)
+        fetch(&input, &native("fixture"), || false)
             .unwrap_err()
             .to_string()
             .contains("branch changed")
     );
     input.repo_key = directory.0.to_str().unwrap().into();
     assert!(
-        fetch(&input, &"fixture".into(), || false)
+        fetch(&input, &native("fixture"), || false)
             .unwrap_err()
             .to_string()
             .contains("does not match daemon metadata")
     );
     input.checkout = Some("relative".into());
     assert!(
-        fetch(&input, &"fixture".into(), || false)
+        fetch(&input, &native("fixture"), || false)
             .unwrap_err()
             .to_string()
             .contains("absolute checkout")
@@ -884,4 +911,226 @@ fn remote_host_drops_credentials_and_path() {
     ] {
         assert_eq!(remote_host(remote), host, "{remote}");
     }
+}
+
+fn gitlab_project() -> crate::forge::gitlab::Project {
+    crate::forge::gitlab::Project {
+        id: 42,
+        web_url: "https://gitlab.example.com/group/sub/app".into(),
+        default_branch: Some("main".into()),
+    }
+}
+
+fn gitlab_detail() -> serde_json::Value {
+    serde_json::json!({
+        "iid": 7, "title": "Add\nthe \u{202e}thing", "state": "opened", "draft": true,
+        "source_branch": "feature", "target_branch": "main",
+        "source_project_id": 42, "target_project_id": 42,
+        "updated_at": "2026-09-20T12:00:00Z",
+        "detailed_merge_status": "not_approved", "has_conflicts": false,
+        "web_url": "https://evil.test/ignored",
+        "head_pipeline": {"status": "failed"}
+    })
+}
+
+#[test]
+fn gitlab_merge_requests_map_to_the_pull_request_model() {
+    use super::gitlab::merge_request;
+    use crate::forge::Kind;
+    let pr = merge_request(&gitlab_detail(), &gitlab_project(), 42, "feature").unwrap();
+    assert_eq!(pr.number, 7);
+    assert_eq!(pr.forge, Kind::GitLab);
+    assert_eq!(pr.reference(), "!7");
+    assert_eq!(pr.noun(), "merge request");
+    // The link is rebuilt from the verified project, never taken from the reply.
+    assert_eq!(
+        pr.url,
+        "https://gitlab.example.com/group/sub/app/-/merge_requests/7"
+    );
+    assert_eq!(pr.title, "Add the  thing");
+    assert_eq!(pr.state, State::Open);
+    assert!(pr.is_draft);
+    assert_eq!(pr.lifecycle(), "Draft");
+    assert_eq!(
+        (pr.head_ref_name.as_str(), pr.base_ref_name.as_str()),
+        ("feature", "main")
+    );
+    assert_eq!(pr.review(), "Review required");
+    assert_eq!(pr.merge_status(), "Merge blocked");
+    assert_eq!(pr.checks_summary, "Pipeline failed");
+    // GitLab reports no line counts, so none are shown rather than `+0 -0`.
+    assert_eq!(pr.line_counts(), None);
+    let theme = crate::config::Theme::default();
+    assert_eq!(pr.color(&theme), theme.muted, "a draft stays muted");
+
+    let mut ready = gitlab_detail();
+    ready["draft"] = false.into();
+    ready["detailed_merge_status"] = "mergeable".into();
+    ready["head_pipeline"] = serde_json::json!({"status": "success"});
+    let pr = merge_request(&ready, &gitlab_project(), 42, "feature").unwrap();
+    assert_eq!(pr.color(&theme), theme.palette[2]);
+    assert_eq!(pr.checks_summary, "Pipeline passed");
+    ready["head_pipeline"] = serde_json::Value::Null;
+    let pr = merge_request(&ready, &gitlab_project(), 42, "feature").unwrap();
+    assert_eq!(pr.checks_summary, "No pipeline reported");
+    assert_eq!(pr.checks(), "No checks reported");
+
+    for (state, expected) in [
+        ("opened", State::Open),
+        ("locked", State::Open),
+        ("closed", State::Closed),
+        ("merged", State::Merged),
+    ] {
+        let mut value = gitlab_detail();
+        value["state"] = state.into();
+        assert_eq!(
+            merge_request(&value, &gitlab_project(), 42, "feature")
+                .unwrap()
+                .state,
+            expected
+        );
+    }
+}
+
+#[test]
+fn gitlab_merge_requests_from_another_project_or_branch_are_refused() {
+    use super::gitlab::merge_request;
+    for (key, value) in [
+        ("state", serde_json::json!("reopened-ish")),
+        ("iid", serde_json::json!(0)),
+        ("source_branch", serde_json::json!("other")),
+        ("source_project_id", serde_json::json!(99)),
+        ("target_project_id", serde_json::json!(99)),
+    ] {
+        let mut detail = gitlab_detail();
+        detail[key] = value;
+        assert!(
+            matches!(
+                merge_request(&detail, &gitlab_project(), 42, "feature"),
+                Err(Error::PrIdentity)
+            ),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn gitlab_listing_selects_one_merge_request_from_the_expected_source() {
+    use super::gitlab::select;
+    let entry = |iid: u64, source: u64, branch: &str| {
+        serde_json::json!({
+            "iid": iid, "source_branch": branch, "source_project_id": source, "target_project_id": 42
+        })
+    };
+    let list = serde_json::json!([
+        entry(3, 99, "feature"),
+        entry(7, 42, "feature"),
+        entry(8, 42, "other")
+    ]);
+    assert_eq!(select(&list, 42, 42, "feature").unwrap(), Some(7));
+    // A fork's branch of the same name is found only by the fork's project.
+    assert_eq!(select(&list, 42, 99, "feature").unwrap(), Some(3));
+    assert_eq!(select(&list, 42, 42, "missing").unwrap(), None);
+    let twice = serde_json::json!([entry(7, 42, "feature"), entry(9, 42, "feature")]);
+    assert!(matches!(
+        select(&twice, 42, 42, "feature"),
+        Err(Error::PrAmbiguous)
+    ));
+    assert!(matches!(
+        select(&serde_json::json!({"message": "404"}), 42, 42, "feature"),
+        Err(Error::GitLabProject)
+    ));
+}
+
+#[test]
+fn gitlab_pipeline_and_merge_status_map_to_shared_states() {
+    use super::gitlab::{merge_state, pipeline};
+    use super::model::Outcome;
+    for (status, outcome) in [
+        ("success", Outcome::Passed),
+        ("failed", Outcome::Failed),
+        ("canceled", Outcome::Failed),
+        ("skipped", Outcome::Skipped),
+        ("running", Outcome::Pending),
+        ("manual", Outcome::Pending),
+        ("something-new", Outcome::Pending),
+    ] {
+        assert_eq!(pipeline(status), outcome, "{status}");
+    }
+    for (status, state) in [
+        ("mergeable", MergeState::Clean),
+        ("conflict", MergeState::Dirty),
+        ("need_rebase", MergeState::Behind),
+        ("draft_status", MergeState::Draft),
+        ("ci_still_running", MergeState::Blocked),
+        ("discussions_not_resolved", MergeState::Blocked),
+        ("checking", MergeState::Unknown),
+        ("something-new", MergeState::Unknown),
+    ] {
+        assert_eq!(merge_state(status, false), state, "{status}");
+    }
+    assert_eq!(merge_state("mergeable", true), MergeState::Dirty);
+}
+
+/// The whole lookup against a real local checkout whose origin is a
+/// self-hosted GitLab, with a fake `glab` answering by endpoint.
+#[cfg(unix)]
+#[test]
+fn gitlab_lookup_resolves_the_checkout_origin_and_asks_glab_by_project() {
+    use crate::forge::{Access, fake::Fake};
+    let directory = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(directory.path()).args(args);
+        let (ok, text) = run(&mut command, Instant::now() + TIMEOUT, &|| false).unwrap();
+        assert!(ok, "fixture git failed: {text}");
+    };
+    git(&["init", "--quiet", "--template=", "-b", "feature"]);
+    git(&[
+        "config",
+        "--local",
+        "remote.origin.url",
+        "git@gitlab.example.com:group/sub/app.git",
+    ]);
+    let detail = gitlab_detail().to_string().replace('\'', "");
+    let fake = Fake::new(
+        "glab",
+        &format!(
+            "case \"$4\" in\n  projects/group%2Fsub%2Fapp) printf '%s' '{project}';;\n  projects/42/merge_requests/7) printf '%s' '{detail}';;\n  projects/42/merge_requests?*) printf '%s' '[{list}]';;\n  *) echo \"unexpected $4\" >&2; exit 1;;\nesac",
+            project = serde_json::json!({
+                "id": 42, "path_with_namespace": "group/sub/app",
+                "web_url": "https://gitlab.example.com/group/sub/app", "default_branch": "main"
+            }),
+            list = serde_json::json!({
+                "iid": 7, "source_branch": "feature", "source_project_id": 42, "target_project_id": 42
+            }),
+        ),
+    );
+    let input = Input {
+        checkout: Some(directory.path().to_str().unwrap().into()),
+        repo_key: directory.path().join(".git").to_str().unwrap().into(),
+        branch: "feature".into(),
+    };
+    let glab = Forges {
+        gitlab: Some(Access::Glab(fake.program.as_path().into())),
+        gitlab_hosts: vec!["gitlab.example.com".to_owned()].into(),
+        ..Forges::default()
+    };
+    let pr = fetch(&input, &glab, || false).unwrap().unwrap();
+    assert_eq!(pr.number, 7);
+    assert_eq!(
+        pr.url,
+        "https://gitlab.example.com/group/sub/app/-/merge_requests/7"
+    );
+    let log = fake.log();
+    assert!(log.contains(&"projects/group%2Fsub%2Fapp".to_owned()));
+    assert!(log.iter().any(|argument| argument
+        == "projects/42/merge_requests?source_branch=feature&order_by=updated_at&sort=desc&per_page=2"));
+    assert!(log.iter().all(|argument| argument != "gitlab.com"));
+    // Without glab signed in to that host, the origin is not reachable, and a
+    // GitHub-only grant set cannot even recognize it as GitLab.
+    assert!(matches!(
+        fetch(&input, &native("fixture"), || false),
+        Err(Error::PrOrigin)
+    ));
 }

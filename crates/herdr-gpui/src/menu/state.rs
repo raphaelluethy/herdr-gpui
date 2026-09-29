@@ -88,6 +88,9 @@ pub(crate) struct MenuState {
     /// Saved SSH devices' own accounts, keyed by endpoint ID. A device without
     /// one signed in looks up pull requests with `github`.
     pub(crate) github_hosts: std::collections::HashMap<String, crate::github::Auth>,
+    /// Whether the user's own forge CLIs are signed in, probed off the UI
+    /// thread. They stand in for a native sign-in; see `HerdrWindow::forges`.
+    pub(crate) forge_cli: crate::forge::Probe,
     /// Saved devices whose removal is running, by endpoint ID. Kept after
     /// success until the catalog drops the device, so its header pulses
     /// until it disappears; the confirmation closes as soon as it starts.
@@ -246,6 +249,7 @@ impl MenuState {
             pr_snapshot: None,
             github: Default::default(),
             github_hosts: Default::default(),
+            forge_cli: Default::default(),
             removing_devices: Default::default(),
             github_selected: None,
             github_scroll: ScrollHandle::new(),

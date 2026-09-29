@@ -1,4 +1,4 @@
-//! Native chrome and GitHub account access.
+//! Native chrome and GitHub account access, native or through `gh`.
 use crate::{HerdrWindow, fonts::StyledFont, menu::Page};
 use gpui::{prelude::*, *};
 
@@ -10,14 +10,25 @@ const AVATAR: f32 = 20.;
 pub(super) const HEIGHT: f32 = 34.;
 
 impl HerdrWindow {
-    fn open_profile(&mut self, connect: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_profile(
+        &mut self,
+        connect: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.menu.page != Some(Page::GitHub) && !self.open_menu(window, cx) {
             return;
         }
         self.menu.page = Some(Page::GitHub);
-        // A device already covered by the main account opens the page rather
-        // than starting a second sign-in for itself.
-        if connect && self.pr_profile().is_none() && !self.github_auth().loading_profile() {
+        // Opening the account panel is when a fresh `gh auth login` should show.
+        self.menu.forge_cli.refresh();
+        // A device already covered by the main account, or by a signed-in
+        // `gh`, opens the page rather than starting a second sign-in for itself.
+        if connect
+            && self.pr_profile().is_none()
+            && self.github_cli_in_use().is_none()
+            && !self.github_auth().loading_profile()
+        {
             self.start_github();
         }
         cx.notify();
@@ -41,10 +52,9 @@ impl HerdrWindow {
         let running = self.git.running().is_some();
         let pr = self.git_pull_request().map(|pr| {
             (
-                format!("#{}", pr.number),
+                pr.reference(),
                 pr.color(theme),
-                pr.additions,
-                pr.deletions,
+                pr.line_counts(),
                 pr.url.clone(),
             )
         });
@@ -61,7 +71,7 @@ impl HerdrWindow {
                 .text_size(px(font.size))
                 .text_color(rgb(theme.foreground))
                 .map(|button| match pr {
-                    Some((number, color, additions, deletions, url)) => button
+                    Some((number, color, counts, url)) => button
                         .child(
                             div()
                                 .id("titlebar-git-pr-link")
@@ -87,34 +97,36 @@ impl HerdrWindow {
                                         .text_color(rgb(color))
                                         .child(number),
                                 )
-                                .child(
-                                    div()
-                                        .debug_selector(|| "titlebar-git-pr-lines".into())
-                                        .flex()
-                                        .child(
-                                            div()
-                                                .debug_selector(|| {
-                                                    "titlebar-git-pr-additions".into()
-                                                })
-                                                .text_color(rgb(theme.palette[2]))
-                                                .child(format!(
-                                                    "+{}",
-                                                    crate::sidebar::compact(additions)
-                                                )),
-                                        )
-                                        .child(div().text_color(rgb(theme.muted)).child("/"))
-                                        .child(
-                                            div()
-                                                .debug_selector(|| {
-                                                    "titlebar-git-pr-deletions".into()
-                                                })
-                                                .text_color(rgb(theme.palette[1]))
-                                                .child(format!(
-                                                    "-{}",
-                                                    crate::sidebar::compact(deletions)
-                                                )),
-                                        ),
-                                ),
+                                .when_some(counts, |link, (additions, deletions)| {
+                                    link.child(
+                                        div()
+                                            .debug_selector(|| "titlebar-git-pr-lines".into())
+                                            .flex()
+                                            .child(
+                                                div()
+                                                    .debug_selector(|| {
+                                                        "titlebar-git-pr-additions".into()
+                                                    })
+                                                    .text_color(rgb(theme.palette[2]))
+                                                    .child(format!(
+                                                        "+{}",
+                                                        crate::sidebar::compact(additions)
+                                                    )),
+                                            )
+                                            .child(div().text_color(rgb(theme.muted)).child("/"))
+                                            .child(
+                                                div()
+                                                    .debug_selector(|| {
+                                                        "titlebar-git-pr-deletions".into()
+                                                    })
+                                                    .text_color(rgb(theme.palette[1]))
+                                                    .child(format!(
+                                                        "-{}",
+                                                        crate::sidebar::compact(deletions)
+                                                    )),
+                                            ),
+                                    )
+                                }),
                         )
                         // The pull request's churn is history; the badge
                         // says work is still sitting in the checkout.
@@ -195,7 +207,10 @@ impl HerdrWindow {
     }
 
     pub(super) fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let image = self.pr_profile().and_then(|p| p.avatar.clone());
+        let image = match self.github_cli_in_use() {
+            Some(account) => account.avatar.clone(),
+            None => self.pr_profile().and_then(|p| p.avatar.clone()),
+        };
         render(self.theme.surface)
             .children(self.render_git_button(cx))
             .child(

@@ -3,6 +3,7 @@
 
 mod about;
 mod actions;
+mod agent_delivery;
 mod agent_skill;
 mod app;
 #[cfg(any(target_os = "macos", test))]
@@ -25,6 +26,7 @@ mod error;
 mod font_picker;
 mod font_sizes;
 mod fonts;
+mod forge;
 mod git;
 mod github;
 mod group_menu;
@@ -43,7 +45,9 @@ mod pane_menu;
 mod preferences;
 mod presentation;
 mod pull_request;
+mod reorder;
 mod repo_items;
+mod review;
 mod search_input;
 mod sessions;
 mod sidebar;

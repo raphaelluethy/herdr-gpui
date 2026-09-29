@@ -2,7 +2,7 @@
 //! belongs to. Herdr has no browser panes, so these live only in this client;
 //! every window shows the same tabs for a workspace, each with its own page.
 use super::Location;
-use crate::state_file;
+use crate::{reorder::Beside, state_file};
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -257,6 +257,34 @@ impl Store {
             .filter(move |tab| tab.origin.as_deref() == Some(pane_id))
     }
 
+    /// Moves a tab beside another; whether it moved. Workspaces list their
+    /// tabs in store order, so landing beside one of the same workspace
+    /// reorders that workspace's strip alone.
+    pub(crate) fn move_tab(&mut self, id: TabId, beside: Beside<TabId>) -> bool {
+        let (Beside::Before(anchor) | Beside::After(anchor)) = beside;
+        if anchor == id {
+            return false;
+        }
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        let tab = self.tabs.remove(from);
+        let Some(at) = self.tabs.iter().position(|tab| tab.id == anchor) else {
+            self.tabs.insert(from, tab);
+            return false;
+        };
+        let to = match beside {
+            Beside::Before(_) => at,
+            Beside::After(_) => at + 1,
+        };
+        self.tabs.insert(to, tab);
+        if to == from {
+            return false;
+        }
+        self.save();
+        true
+    }
+
     pub(crate) fn close(&mut self, id: TabId) -> Option<Tab> {
         let index = self.tabs.iter().position(|tab| tab.id == id)?;
         let tab = self.tabs.remove(index);
@@ -350,6 +378,42 @@ mod tests {
         assert_eq!(store.get(a).unwrap().title, "localhost");
         let blank = store.open(local, "w_1", None, None).unwrap();
         assert_eq!(store.get(blank).unwrap().title, "New Tab");
+    }
+
+    #[test]
+    fn a_moved_tab_lands_beside_another_of_its_workspace() {
+        let mut store = Store::default();
+        let scope = Scope::endpoint("local");
+        let open = |store: &mut Store, workspace| {
+            store.open(scope.clone(), workspace, None, None).unwrap()
+        };
+        let a = open(&mut store, "w_1");
+        let other = open(&mut store, "w_2");
+        let b = open(&mut store, "w_1");
+        let c = open(&mut store, "w_1");
+        let ids = |store: &Store| {
+            store
+                .in_workspace(&scope, "w_1")
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>()
+        };
+        assert!(store.move_tab(c, Beside::Before(a)));
+        assert_eq!(ids(&store), [c, a, b]);
+        assert!(store.move_tab(c, Beside::After(b)));
+        assert_eq!(ids(&store), [a, b, c]);
+        // Where it already stands, beside itself, or beside a missing tab,
+        // nothing moves.
+        assert!(!store.move_tab(c, Beside::After(b)));
+        assert!(!store.move_tab(b, Beside::Before(b)));
+        assert!(!store.move_tab(b, Beside::Before(TabId::test(999))));
+        assert_eq!(ids(&store), [a, b, c]);
+        assert_eq!(
+            store
+                .in_workspace(&scope, "w_2")
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>(),
+            [other]
+        );
     }
 
     #[test]

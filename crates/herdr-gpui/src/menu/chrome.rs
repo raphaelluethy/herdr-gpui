@@ -614,7 +614,7 @@ impl HerdrWindow {
                         })),
                 );
             }
-            if self.pr_profile().is_some() {
+            if self.has_forge_access() {
                 panel = panel.child(self.render_workspace_pr(
                     (px(340.).min((viewport.width - px(24.)).max(px(0.))) - px(30.)).max(px(0.)),
                     cx,

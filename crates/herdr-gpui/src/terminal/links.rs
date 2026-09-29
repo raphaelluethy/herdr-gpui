@@ -1,8 +1,9 @@
 //! Resolve user-selected web links within the painted pane or popup only.
 use super::{HIDDEN, InputTarget, popup_origin, wheel_target};
 use herdr_client::protocol::{FrameData, PaneSurfaceFrame};
+use std::ops::Range;
 
-const MAX_ROW_BYTES: usize = 32768;
+pub(super) const MAX_ROW_BYTES: usize = 32768;
 
 fn web_url(value: &str) -> Option<String> {
     crate::browser::WebUrl::try_from(value)
@@ -93,6 +94,17 @@ fn frame_link(frame: &FrameData, column: u16, row: u16, start: u16, end: u16) ->
     }
     // Plain URLs are row-local: the protocol doesn't distinguish soft wraps from
     // separate lines, so joining rows could silently change the destination.
+    match plain_url(&text, hit)? {
+        (_, true) => None,
+        (range, false) => web_url(&text[range]),
+    }
+}
+
+/// The byte range of the plain web URL in one row's `text` that covers the
+/// byte at `hit`, trimmed of the prose punctuation around it, and whether the
+/// URL runs to the end of the row, where it may continue off-screen or on the
+/// next row.
+pub(super) fn plain_url(text: &str, hit: usize) -> Option<(Range<usize>, bool)> {
     for (start, _) in text.match_indices("http") {
         if start > hit {
             break;
@@ -108,9 +120,7 @@ fn frame_link(frame: &FrameData, column: u16, row: u16, start: u16, end: u16) ->
             .unwrap_or(tail.len());
         // Check the original token: punctuation at the edge may be part of a
         // destination continuing off-screen or on the next row.
-        if end == tail.len() {
-            return None;
-        }
+        let open = end == tail.len();
         let mut candidate = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
         for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
             let excess = candidate
@@ -125,7 +135,10 @@ fn frame_link(frame: &FrameData, column: u16, row: u16, start: u16, end: u16) ->
             }
         }
         if hit < start + candidate.len() {
-            return web_url(candidate);
+            return Some((start..start + candidate.len(), open));
+        }
+        if open {
+            return None;
         }
     }
     None

@@ -1,4 +1,7 @@
-//! Native GitHub transport and device authorization. No credential subprocesses.
+//! Native GitHub transport and device authorization. No credential
+//! subprocesses: this module never runs `gh` or reads its token. The user's own
+//! authenticated CLI is used, separately and without extracting its
+//! credential, through `forge`.
 
 mod auth;
 mod credentials;

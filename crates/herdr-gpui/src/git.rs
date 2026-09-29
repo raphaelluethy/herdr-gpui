@@ -8,9 +8,12 @@
 //! are explicit user actions and are never retried or replayed automatically.
 use crate::{
     Error,
-    pull_request::{Input, clean, local_checkout, origin_repository, run},
+    forge::{
+        Access, Forges, Remote, Variable,
+        gitlab::{Client, Project},
+    },
+    pull_request::{Input, clean, local_checkout, origin_remote, run},
 };
-use secrecy::SecretString;
 use std::{
     collections::VecDeque,
     process::Command,
@@ -96,7 +99,7 @@ enum Job {
     /// Is there anything to commit? Cheaper than counting lines, and all a
     /// sidebar row needs to show its dot.
     Dirty,
-    Run(Action, Option<Arc<SecretString>>),
+    Run(Action, Option<Forges>),
 }
 
 enum Completion {
@@ -293,7 +296,7 @@ impl Git {
     }
 
     /// Queue an explicit user action against the tracked checkout.
-    pub fn start(&mut self, action: Action, token: Option<Arc<SecretString>>) -> crate::Result<()> {
+    pub fn start(&mut self, action: Action, forges: Option<Forges>) -> crate::Result<()> {
         if self.running.is_some() {
             return Err(Error::GitBusy);
         }
@@ -303,13 +306,13 @@ impl Git {
         {
             return Err(Error::GitCommitMessage);
         }
-        if matches!(action, Action::CreatePullRequest) && token.is_none() {
-            return Err(Error::GitHubAuthentication);
+        if matches!(action, Action::CreatePullRequest) && forges.is_none() {
+            return Err(Error::ForgeUnavailable);
         }
         self.error = None;
         self.outcome = None;
         self.running = Some(action.clone());
-        self.waiting = Some((input, Job::Run(action, token)));
+        self.waiting = Some((input, Job::Run(action, forges)));
         Ok(())
     }
 
@@ -433,7 +436,7 @@ fn execute(input: &Input, job: Job, cancelled: &impl Fn() -> bool) -> Completion
         // Writes are never cancelled: killing `git commit` or `git push`
         // halfway through can leave an index lock or a half-written ref behind,
         // so only their own deadline ends them.
-        Job::Run(action, token) => Completion::Action(perform(input, action, token, &|| false)),
+        Job::Run(action, forges) => Completion::Action(perform(input, action, forges, &|| false)),
     }
 }
 
@@ -513,7 +516,7 @@ fn parse_numstat(text: &str) -> Status {
 fn perform(
     input: &Input,
     action: Action,
-    token: Option<Arc<SecretString>>,
+    forges: Option<Forges>,
     cancelled: &impl Fn() -> bool,
 ) -> crate::Result<Outcome> {
     let deadline = Instant::now() + OPERATION_TIMEOUT;
@@ -522,8 +525,8 @@ fn perform(
         Action::Commit(message) => commit(&checkout, &message, deadline, cancelled),
         Action::Push => push(&checkout, &input.branch, deadline, cancelled),
         Action::CreatePullRequest => {
-            let token = token.ok_or(Error::GitHubAuthentication)?;
-            create_pull_request(&checkout, &input.branch, &token, deadline, cancelled)
+            let forges = forges.ok_or(Error::ForgeUnavailable)?;
+            create_pull_request(&checkout, &input.branch, &forges, deadline, cancelled)
         }
     }
 }
@@ -586,11 +589,12 @@ fn push(
 fn create_pull_request(
     checkout: &str,
     branch: &str,
-    token: &SecretString,
+    forges: &Forges,
     deadline: Instant,
     cancelled: &impl Fn() -> bool,
 ) -> crate::Result<Outcome> {
-    let (owner, repo) = origin_repository(checkout, deadline, cancelled)?;
+    let remote = origin_remote(checkout, forges, deadline, cancelled)?;
+    let access = forges.access(&remote)?;
     let title = clean(&git(
         checkout,
         &["log", "-1", "--pretty=format:%s"],
@@ -602,7 +606,7 @@ fn create_pull_request(
     if title.is_empty() {
         return Err(Error::GitPullRequestTitle);
     }
-    // The head ref must exist on GitHub before a pull request can reference it.
+    // The head ref must exist on the forge before a pull request can reference it.
     git(
         checkout,
         &["push", "--set-upstream", "origin", branch],
@@ -610,12 +614,90 @@ fn create_pull_request(
         deadline,
         cancelled,
     )?;
+    match access {
+        Access::Native(_) | Access::Gh(_) => {
+            create_github_pull_request(&remote, access, branch, &title, cancelled)
+        }
+        Access::Glab(program) => {
+            create_gitlab_merge_request(program, &remote, branch, &title, cancelled)
+        }
+    }
+}
+
+/// Open a merge request into the project's default branch through `glab`,
+/// addressing the project by the ID its verified path resolves to.
+fn create_gitlab_merge_request(
+    program: &std::path::Path,
+    remote: &Remote,
+    branch: &str,
+    title: &str,
+    cancelled: &impl Fn() -> bool,
+) -> crate::Result<Outcome> {
+    let client = Client {
+        program,
+        host: &remote.host,
+    };
     let mut cooldown = None;
-    let repository = crate::github::graphql(
+    let project = client.project(
+        remote,
+        Instant::now() + API_TIMEOUT,
+        cancelled,
+        &mut cooldown,
+    )?;
+    let base = project.default_branch.clone().ok_or(Error::GitLabProject)?;
+    if base == branch {
+        return Err(Error::GitPullRequestBase);
+    }
+    let created = client.post(
+        "create_mr",
+        &format!("projects/{}/merge_requests", project.id),
+        &[
+            ("source_branch", branch),
+            ("target_branch", &base),
+            ("title", title),
+        ],
+        Instant::now() + API_TIMEOUT,
+        cancelled,
+        &mut cooldown,
+    )?;
+    parse_created_merge_request(&created, &project, branch)
+}
+
+fn parse_created_merge_request(
+    response: &serde_json::Value,
+    project: &Project,
+    branch: &str,
+) -> crate::Result<Outcome> {
+    let iid = response["iid"].as_u64().filter(|iid| *iid > 0);
+    let Some(iid) = iid.filter(|_| {
+        response["source_branch"].as_str() == Some(branch)
+            && response["target_project_id"].as_u64() == Some(project.id)
+    }) else {
+        return Err(Error::PrIdentity);
+    };
+    Ok(Outcome {
+        message: format!("Opened merge request !{iid}"),
+        url: Some(format!("{}/-/merge_requests/{iid}", project.web_url)),
+    })
+}
+
+fn create_github_pull_request(
+    remote: &Remote,
+    access: &Access,
+    branch: &str,
+    title: &str,
+    cancelled: &impl Fn() -> bool,
+) -> crate::Result<Outcome> {
+    let (owner, repo) = (remote.owner(), remote.name());
+    let mut cooldown = None;
+    let repository = crate::forge::graphql(
         "create_pr_repository",
-        token,
+        access,
         REPOSITORY_QUERY,
-        serde_json::json!({"owner": owner, "repo": repo}),
+        &[
+            ("owner", Variable::Text(owner)),
+            ("repo", Variable::Text(repo)),
+        ],
         API_TIMEOUT,
         cancelled,
         &mut cooldown,
@@ -633,18 +715,22 @@ fn create_pull_request(
     if base == branch {
         return Err(Error::GitPullRequestBase);
     }
-    let created = crate::github::graphql(
+    let created = crate::forge::graphql(
         "create_pr",
-        token,
+        access,
         CREATE_MUTATION,
-        serde_json::json!({
-            "repository": id, "base": base, "head": branch, "title": title, "body": ""
-        }),
+        &[
+            ("repository", Variable::Text(&id)),
+            ("base", Variable::Text(&base)),
+            ("head", Variable::Text(branch)),
+            ("title", Variable::Text(title)),
+            ("body", Variable::Text("")),
+        ],
         API_TIMEOUT,
         cancelled,
         &mut cooldown,
     )?;
-    parse_created(&created, &owner, &repo)
+    parse_created(&created, owner, repo)
 }
 
 fn parse_created(response: &serde_json::Value, owner: &str, repo: &str) -> crate::Result<Outcome> {
@@ -662,8 +748,9 @@ fn parse_created(response: &serde_json::Value, owner: &str, repo: &str) -> crate
 }
 
 /// Every Git child runs through the shared process policy: no shell, no
-/// terminal prompts, bounded output, and a deadline the caller owns.
-fn git(
+/// terminal prompts, bounded output, and a deadline the caller owns. The
+/// review panel's worker runs its commands through here too.
+pub(crate) fn git(
     checkout: &str,
     args: &[&str],
     operation: &'static str,
@@ -913,7 +1000,7 @@ mod tests {
         ));
         assert!(matches!(
             peer.git.start(Action::CreatePullRequest, None),
-            Err(Error::GitHubAuthentication)
+            Err(Error::ForgeUnavailable)
         ));
         peer.git
             .start(Action::Commit("subject".into()), None)
@@ -1073,5 +1160,73 @@ mod tests {
                 Err(Error::PrIdentity)
             ));
         }
+    }
+
+    #[test]
+    fn created_merge_requests_must_match_their_project_and_branch() {
+        let project = Project {
+            id: 42,
+            web_url: "https://gitlab.example.com/group/sub/app".into(),
+            default_branch: Some("main".into()),
+        };
+        let response = |iid: u64, branch: &str, target: u64| {
+            serde_json::json!({
+                "iid": iid, "source_branch": branch, "target_project_id": target,
+                "web_url": "https://evil.test/ignored"
+            })
+        };
+        let outcome =
+            parse_created_merge_request(&response(7, "feature", 42), &project, "feature").unwrap();
+        assert_eq!(outcome.message, "Opened merge request !7");
+        // The link is rebuilt from the verified project, not the reply.
+        assert_eq!(
+            outcome.url.as_deref(),
+            Some("https://gitlab.example.com/group/sub/app/-/merge_requests/7")
+        );
+        for (iid, branch, target) in [(0, "feature", 42), (7, "other", 42), (7, "feature", 9)] {
+            assert!(matches!(
+                parse_created_merge_request(&response(iid, branch, target), &project, "feature"),
+                Err(Error::PrIdentity)
+            ));
+        }
+    }
+
+    /// Creating a merge request pushes the branch, reads the default branch,
+    /// and posts to the project by ID through a fake `glab`; the default
+    /// branch itself is refused before anything is posted.
+    #[cfg(unix)]
+    #[test]
+    fn merge_requests_are_created_through_glab_into_the_default_branch() {
+        let fake = crate::forge::fake::Fake::new(
+            "glab",
+            "case \"$4\" in\n  projects/group%2Fapp) printf '%s' '{\"id\":42,\"path_with_namespace\":\"group/app\",\"web_url\":\"https://gitlab.example.com/group/app\",\"default_branch\":\"main\"}';;\n  *) printf '%s' '{\"iid\":9,\"source_branch\":\"feature\",\"target_project_id\":42}';;\nesac",
+        );
+        let remote = Remote {
+            kind: crate::forge::Kind::GitLab,
+            host: "gitlab.example.com".into(),
+            path: "group/app".into(),
+        };
+        let outcome =
+            create_gitlab_merge_request(&fake.program, &remote, "feature", "Add it", &|| false)
+                .unwrap();
+        assert_eq!(outcome.message, "Opened merge request !9");
+        let log = fake.log();
+        let post = log.iter().position(|argument| argument == "POST").unwrap();
+        assert_eq!(
+            &log[post + 1..],
+            [
+                "projects/42/merge_requests",
+                "-f",
+                "source_branch=feature",
+                "-f",
+                "target_branch=main",
+                "-f",
+                "title=Add it"
+            ]
+        );
+        assert!(matches!(
+            create_gitlab_merge_request(&fake.program, &remote, "main", "Add it", &|| false),
+            Err(Error::GitPullRequestBase)
+        ));
     }
 }

@@ -254,24 +254,22 @@ pub(super) fn dirty(key: &str, size: f32, theme: &Theme) -> Div {
 }
 
 /// The pull request's `+additions -deletions`, colored or muted, and the
-/// width it needs at `glyph`.
-pub(super) fn pr_counts(key: &str, pr: &PrBadge, glyph: f32, colors: (u32, u32)) -> (f32, Div) {
-    let glyphs = pr.additions.chars().count() + pr.deletions.chars().count() + 1;
+/// width it needs at `glyph`. None when its forge reports no line counts.
+pub(super) fn pr_counts(
+    key: &str,
+    pr: &PrBadge,
+    glyph: f32,
+    colors: (u32, u32),
+) -> Option<(f32, Div)> {
+    let (additions, deletions) = pr.counts.as_ref()?;
+    let glyphs = additions.chars().count() + deletions.chars().count() + 1;
     let element = div()
         .debug_selector(|| format!("pr-{key}"))
         .flex()
         .gap(px(glyph))
-        .child(
-            div()
-                .text_color(rgb(colors.0))
-                .child(label_text(&pr.additions)),
-        )
-        .child(
-            div()
-                .text_color(rgb(colors.1))
-                .child(label_text(&pr.deletions)),
-        );
-    ((glyphs as f32 * glyph).ceil(), element)
+        .child(div().text_color(rgb(colors.0)).child(label_text(additions)))
+        .child(div().text_color(rgb(colors.1)).child(label_text(deletions)));
+    Some(((glyphs as f32 * glyph).ceil(), element))
 }
 
 /// The pull request's number beside a branch mark, both in its state color,

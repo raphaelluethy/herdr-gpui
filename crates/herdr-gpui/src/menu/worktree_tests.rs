@@ -6,48 +6,49 @@ use super::{
 };
 use crate::{
     HerdrWindow,
-    repo_items::{Branch, Item, Kind, Origin},
+    forge::Remote,
+    repo_items::{Branch, Item, Kind},
     sidebar,
 };
 use gpui::{Entity, VisualTestContext};
 
-fn origin() -> Origin {
-    Origin {
-        owner: "penso".into(),
-        repo: "herdr-gpui".into(),
-    }
+fn origin() -> Remote {
+    Remote::github("penso", "herdr-gpui")
 }
 
 fn items() -> Vec<Item> {
     vec![
         Item {
+            forge: crate::forge::Kind::GitHub,
             kind: Kind::PullRequest,
             number: 48,
             title: "Centre the worktree dialog".into(),
             url: "https://github.com/penso/herdr-gpui/pull/48".into(),
             author: "penso".into(),
             head: Some("worktree/rapid-forest".into()),
-            fork_owner: None,
+            fork: false,
             draft: false,
         },
         Item {
+            forge: crate::forge::Kind::GitHub,
             kind: Kind::PullRequest,
             number: 51,
             title: "Fork contribution".into(),
             url: "https://github.com/penso/herdr-gpui/pull/51".into(),
             author: "outsider".into(),
             head: Some("patch-1".into()),
-            fork_owner: Some("outsider".into()),
+            fork: true,
             draft: true,
         },
         Item {
+            forge: crate::forge::Kind::GitHub,
             kind: Kind::Issue,
             number: 1255,
             title: "bug: agent end message is empty".into(),
             url: "https://github.com/penso/herdr-gpui/issues/1255".into(),
             author: "penso".into(),
             head: None,
-            fork_owner: None,
+            fork: false,
             draft: false,
         },
     ]

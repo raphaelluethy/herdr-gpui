@@ -86,6 +86,8 @@ position = "bottom-right"
 # primary first. "" or [] unbinds it. Assigning a keystroke here takes it away
 # from its default command. Modifiers: cmd (super on Linux), ctrl, alt, shift,
 # fn; keystrokes need at least one of cmd, ctrl, alt, or fn.
+# Herdr's own [keys] in config.toml (prefix chords included) add to these
+# defaults; a command named here keeps only the keystrokes listed here.
 # [keybindings]
 # new_tab = "cmd-t"
 # new_workspace = "cmd-shift-n"
@@ -106,6 +108,7 @@ position = "bottom-right"
 # close_tab = "cmd-shift-w"
 # focus_tab_1 = "cmd-1"   # through focus_tab_9 = "cmd-9"
 # toggle_sidebar = "cmd-b"
+# toggle_review_panel = "cmd-shift-g"
 # increase_font_size = ["cmd-=", "cmd-+"]
 # decrease_font_size = "cmd--"
 # reset_font_size = "cmd-0"
@@ -157,6 +160,17 @@ size = 12
 # WARNING: saves an UNENCRYPTED token in the separate 0600 github-credentials file.
 # Other software running as you and backups can read it. Default is false.
 # allow_plaintext_credentials = false
+# Use your own authenticated GitHub CLI (`gh auth login`) for pull requests.
+# Its credential stays with gh; this app only runs `gh api`. "auto" uses gh
+# when there is no native sign-in, "prefer" uses gh even when there is one,
+# and "off" never runs gh.
+# cli = "auto"
+
+# GitLab merge requests come from your own authenticated GitLab CLI
+# (`glab auth login`), for gitlab.com and the self-hosted instances it is
+# signed in to. Its credential stays with glab. "off" never runs glab.
+# [gitlab]
+# cli = "auto"
 
 # Optional behaviors, all off unless turned on here. Unknown keys are rejected.
 # [features]

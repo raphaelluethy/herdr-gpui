@@ -178,7 +178,7 @@ impl Render for HerdrWindow {
                     // A press on a link may still turn into a drag across it,
                     // so the selection starts either way; the click that opens
                     // the link is the one that never left its half-cell.
-                    this.begin_selection(event.position, cx);
+                    this.begin_selection(event.position, event.click_count, cx);
                     if this.pressed_terminal_link.is_some() {
                         cx.stop_propagation();
                         return;
@@ -545,6 +545,20 @@ impl Render for HerdrWindow {
                     .bg(rgb(self.theme.surface))
                     .text_color(rgb(self.theme.foreground))
                     .children(self.render_usage(cx))
+                    .when_some(
+                        self.prefix_armed
+                            .then(|| self.config.keybindings.prefix_label())
+                            .flatten(),
+                        |bar, prefix| bar.child(
+                            div()
+                                .debug_selector(|| "prefix-armed".into())
+                                .flex_none()
+                                .px(px(6.))
+                                .rounded(px(crate::config::corners::SMALL))
+                                .bg(rgb(self.theme.active))
+                                .child(prefix),
+                        ),
+                    )
                     .when(!self.live.status.is_connected(), |bar| bar.child(
                         if matches!(self.live.status, ConnectionStatus::StartingDaemon) {
                             div()
@@ -692,7 +706,8 @@ impl Render for HerdrWindow {
                             })),
                     ),
                             ),
-                    ),
+                    )
+                    .children(self.render_review_panel(window, cx)),
             )
             .children(self.render_toasts(window, cx))
             .children(self.render_file_transfer(window, cx))

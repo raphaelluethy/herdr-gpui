@@ -21,7 +21,7 @@ impl HerdrWindow {
 
     pub(super) fn refresh_workspace_pr(&mut self) {
         self.menu.pr.clear();
-        if self.pr_profile().is_none() {
+        if !self.has_forge_access() {
             return;
         }
         let result = (|| {
@@ -67,16 +67,16 @@ impl HerdrWindow {
             self.menu.pr_cache.clear();
             self.menu.pr_cache_connection = Some(Arc::downgrade(&endpoint.connection.inbox));
         }
-        if let (Some(snapshot), Some(profile), Some(origin)) =
-            (&self.live.snapshot, self.pr_profile(), self.pr_origin())
+        let forges = self.forges();
+        if let (Some(snapshot), false, Some(origin)) =
+            (&self.live.snapshot, forges.is_empty(), self.pr_origin())
         {
             let scope = (
                 self.selection_epoch,
                 self.endpoints[self.selected_endpoint].generation,
                 snapshot.boot_id.clone(),
             );
-            let token = profile.token.clone();
-            self.menu.pr_cache.scope(scope, token, origin);
+            self.menu.pr_cache.scope(scope, forges, origin);
         }
     }
 
@@ -105,7 +105,7 @@ impl HerdrWindow {
 
     pub(crate) fn update_workspace_pr(&mut self) -> bool {
         let mut changed = false;
-        if self.pr_profile().is_none() {
+        if !self.has_forge_access() {
             self.menu.pr_cache.clear();
             self.menu.pr.clear();
             if self.menu.workspace_selected == Some(WorkspaceMenuAction::PullRequest) {
@@ -176,7 +176,7 @@ impl HerdrWindow {
     }
 
     pub(super) fn open_workspace_pr(&self, cx: &mut Context<Self>) {
-        if self.pr_profile().is_some()
+        if self.has_forge_access()
             && self.workspace_pr_target_current()
             && let Some(pr) = &self.menu.pr.value
         {
@@ -199,93 +199,94 @@ impl HerdrWindow {
         if let Some(value) = &pr.value {
             let action = WorkspaceMenuAction::PullRequest;
             let color = value.color(theme);
-            section =
-                section
-                    .child(
-                        div()
-                            .id("workspace-pr-title")
-                            .debug_selector(|| "workspace-pr-title".into())
-                            .px(px(8.))
-                            .py(px(6.))
-                            .flex_none()
-                            .rounded(px(crate::config::corners::CONTROL))
-                            .cursor_pointer()
-                            .when(self.menu.workspace_selected == Some(action), |row| {
-                                row.bg(rgb(theme.active))
-                            })
-                            .on_hover(cx.listener(move |this, hovered, _, cx| {
-                                if *hovered {
-                                    this.menu.workspace_selected = Some(action);
-                                } else if this.menu.workspace_selected == Some(action) {
-                                    this.menu.workspace_selected = None;
-                                }
-                                cx.notify();
-                            }))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.activate_workspace_menu(action, window, cx);
-                            }))
-                            .child(
-                                div()
-                                    .w(text_width)
-                                    .truncate()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(crate::sidebar::label_text(&format!(
-                                        "#{} {}",
-                                        value.number, value.title
-                                    ))),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .ml(px(8.))
-                            .w(text_width)
-                            .flex_none()
-                            .truncate()
-                            .text_size(px((self.config.ui.size - 1.).max(8.)))
-                            .text_color(rgb(theme.muted))
-                            .child(format!(
-                                "{} -> {}",
-                                value.head_ref_name, value.base_ref_name
-                            )),
-                    )
-                    .child(
-                        div()
-                            .mx(px(8.))
-                            .mt(px(8.))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .px(px(6.))
-                                    .rounded(px(crate::config::corners::CONTROL))
-                                    .bg(rgba((color << 8) | 0x20))
-                                    .text_color(rgb(color))
-                                    .child(value.lifecycle()),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_color(rgb(theme.muted))
-                                    .child(value.review()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mx(px(8.))
-                            .mt(px(4.))
-                            .text_color(rgb(theme.muted))
-                            .child(value.merge_status()),
-                    )
-                    .child(
-                        div()
-                            .mx(px(8.))
-                            .mt(px(4.))
-                            .child(value.checks_summary.clone()),
-                    )
-                    .child(
+            section = section
+                .child(
+                    div()
+                        .id("workspace-pr-title")
+                        .debug_selector(|| "workspace-pr-title".into())
+                        .px(px(8.))
+                        .py(px(6.))
+                        .flex_none()
+                        .rounded(px(crate::config::corners::CONTROL))
+                        .cursor_pointer()
+                        .when(self.menu.workspace_selected == Some(action), |row| {
+                            row.bg(rgb(theme.active))
+                        })
+                        .on_hover(cx.listener(move |this, hovered, _, cx| {
+                            if *hovered {
+                                this.menu.workspace_selected = Some(action);
+                            } else if this.menu.workspace_selected == Some(action) {
+                                this.menu.workspace_selected = None;
+                            }
+                            cx.notify();
+                        }))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.activate_workspace_menu(action, window, cx);
+                        }))
+                        .child(
+                            div()
+                                .w(text_width)
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(crate::sidebar::label_text(&format!(
+                                    "{} {}",
+                                    value.reference(),
+                                    value.title
+                                ))),
+                        ),
+                )
+                .child(
+                    div()
+                        .ml(px(8.))
+                        .w(text_width)
+                        .flex_none()
+                        .truncate()
+                        .text_size(px((self.config.ui.size - 1.).max(8.)))
+                        .text_color(rgb(theme.muted))
+                        .child(format!(
+                            "{} -> {}",
+                            value.head_ref_name, value.base_ref_name
+                        )),
+                )
+                .child(
+                    div()
+                        .mx(px(8.))
+                        .mt(px(8.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .px(px(6.))
+                                .rounded(px(crate::config::corners::CONTROL))
+                                .bg(rgba((color << 8) | 0x20))
+                                .text_color(rgb(color))
+                                .child(value.lifecycle()),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_color(rgb(theme.muted))
+                                .child(value.review()),
+                        ),
+                )
+                .child(
+                    div()
+                        .mx(px(8.))
+                        .mt(px(4.))
+                        .text_color(rgb(theme.muted))
+                        .child(value.merge_status()),
+                )
+                .child(
+                    div()
+                        .mx(px(8.))
+                        .mt(px(4.))
+                        .child(value.checks_summary.clone()),
+                )
+                .when_some(value.line_counts(), |section, (additions, deletions)| {
+                    section.child(
                         div()
                             .mx(px(8.))
                             .mt(px(6.))
@@ -294,12 +295,16 @@ impl HerdrWindow {
                             .items_center()
                             .flex_wrap()
                             .gap(px(8.))
-                            .child(div().text_color(rgb(theme.palette[2])).child(
-                                crate::sidebar::label_text(&format!("+{}", value.additions)),
-                            ))
-                            .child(div().text_color(rgb(theme.palette[1])).child(
-                                crate::sidebar::label_text(&format!("-{}", value.deletions)),
-                            ))
+                            .child(
+                                div()
+                                    .text_color(rgb(theme.palette[2]))
+                                    .child(crate::sidebar::label_text(&format!("+{additions}"))),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(theme.palette[1]))
+                                    .child(crate::sidebar::label_text(&format!("-{deletions}"))),
+                            )
                             .child(div().text_color(rgb(theme.muted)).child(format!(
                                 "{} {}",
                                 value.changed_files,
@@ -309,7 +314,8 @@ impl HerdrWindow {
                                     "files"
                                 }
                             ))),
-                    );
+                    )
+                });
         }
         if pr.loading {
             section = section.child(
@@ -317,7 +323,7 @@ impl HerdrWindow {
                     .px(px(8.))
                     .py(px(4.))
                     .text_color(rgb(theme.muted))
-                    .child("Checking GitHub..."),
+                    .child("Checking for a pull request..."),
             );
         } else if let Some(message) = &pr.message {
             section = section.child(
@@ -336,7 +342,7 @@ impl HerdrWindow {
                     .px(px(8.))
                     .py(px(4.))
                     .text_color(rgb(theme.muted))
-                    .child("No PR found for this origin and branch."),
+                    .child("No pull or merge request found for this origin and branch."),
             );
         }
         section
@@ -744,6 +750,7 @@ mod tests {
         client.handle.disconnect();
         crate::pull_request::local_repository(
             &input,
+            &crate::forge::Forges::default(),
             Instant::now() + Duration::from_secs(15),
             &|| false,
         )
@@ -768,7 +775,10 @@ mod tests {
         lookup.request(
             input,
             crate::pull_request::Origin::Local,
-            profile.token.clone(),
+            crate::forge::Forges {
+                github: Some(crate::forge::Access::Native(profile.token.clone())),
+                ..Default::default()
+            },
         );
         let deadline = Instant::now() + Duration::from_secs(20);
         while lookup.loading && Instant::now() < deadline {

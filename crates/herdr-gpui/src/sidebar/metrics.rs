@@ -32,7 +32,7 @@ pub(super) fn line_height(font: &FontConfig) -> f32 {
     font.size * 4. / 3.
 }
 
-pub(super) fn sidebar_width(preferred: Option<f32>, window_width: f32) -> f32 {
+pub(crate) fn sidebar_width(preferred: Option<f32>, window_width: f32) -> f32 {
     // Keep useful label space and reserve at least 240 logical pixels for the terminal.
     preferred
         .unwrap_or(SIDEBAR_WIDTH)

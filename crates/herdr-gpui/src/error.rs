@@ -144,8 +144,33 @@ pub enum Error {
     PrRepositoryMismatch,
     #[error("Checkout branch changed. Waiting for daemon metadata.")]
     PrBranchChanged,
-    #[error("PR lookup supports GitHub.com origins only.")]
+    #[error("PR lookup supports GitHub.com and signed-in GitLab origins only.")]
     PrOrigin,
+    #[error("{} access unavailable for this repository. {}", .0.name(), .0.login_hint())]
+    ForgeAccess(crate::forge::Kind),
+    #[error(
+        "No GitHub or GitLab access. Sign in from the GitHub panel, or run `gh auth login` or `glab auth login`."
+    )]
+    ForgeUnavailable,
+    #[error("GitLab project unavailable. Check that glab can read this repository.")]
+    GitLabProject,
+    #[error("{} is not installed.", .0.cli())]
+    CliMissing(crate::forge::Kind),
+    #[error("{} is not signed in. {}", .0.cli(), .0.login_hint())]
+    CliSignedOut(crate::forge::Kind),
+    #[error("{} rate limit reached through {}. Retry later.", .0.name(), .0.cli())]
+    CliRateLimit(crate::forge::Kind),
+    #[error("{} request failed: {details}", kind.cli())]
+    CliFailed {
+        kind: crate::forge::Kind,
+        details: String,
+    },
+    #[error("Invalid {} JSON output.", kind.cli())]
+    CliJson {
+        kind: crate::forge::Kind,
+        #[source]
+        source: GitHubJsonError,
+    },
     #[error("No local worktree matches the daemon branch.")]
     PrMissingWorktree,
     #[error("Multiple local worktrees match the daemon branch.")]
@@ -193,6 +218,26 @@ pub enum Error {
     GitPullRequestBase,
     #[error("Git worker stopped. Retry the operation.")]
     GitWorker,
+    #[error(
+        "No base branch to compare with: origin has no default branch, and there is no origin/main, origin/master, main, or master."
+    )]
+    ReviewNoBase,
+    #[error("The branch has no commits yet, so there is nothing to compare it with.")]
+    ReviewUnborn,
+    #[error("Git named a path outside the checkout; it was not touched.")]
+    ReviewUnsafePath,
+    #[error("Could not {operation} the file.")]
+    ReviewFile {
+        operation: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Send or remove review comments before adding more; a checkout holds 50 at most.")]
+    ReviewNotesFull,
+    #[error("Write the comment first.")]
+    ReviewEmptyComment,
+    #[error("Review worker stopped. Refresh to retry.")]
+    ReviewWorker,
     #[error("Could not {operation}.")]
     GitProcess {
         operation: &'static str,
@@ -548,6 +593,13 @@ pub enum Error {
 impl Error {
     pub(crate) fn github_json(source: serde_json::Error) -> Self {
         Self::GitHubJson(GitHubJsonError(source))
+    }
+
+    pub(crate) fn cli_json(kind: crate::forge::Kind, source: serde_json::Error) -> Self {
+        Self::CliJson {
+            kind,
+            source: GitHubJsonError(source),
+        }
     }
 
     pub(crate) fn at_path(self, path: &Path) -> Self {

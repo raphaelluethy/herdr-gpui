@@ -6,6 +6,7 @@
 use super::layout_tests;
 use super::{
     ARROW_RESERVE, ICON_RESERVE, STATUS_WIDTH,
+    agents::status_style,
     cell::RowState,
     glyph_width,
     layout::{SidebarDensity, SidebarLook},
@@ -166,17 +167,21 @@ impl RowBadge {
 pub(super) struct PrBadge {
     pub(super) number: String,
     pub(super) color: u32,
-    pub(super) additions: String,
-    pub(super) deletions: String,
+    /// `+additions` and `-deletions`, when the forge reports line counts.
+    pub(super) counts: Option<(String, String)>,
 }
 
 impl PrBadge {
     pub(super) fn new(pr: &crate::pull_request::PullRequest, theme: &Theme) -> Self {
         Self {
-            number: format!("#{}", pr.number),
+            number: pr.reference(),
             color: pr.color(theme),
-            additions: format!("+{}", compact(pr.additions)),
-            deletions: format!("-{}", compact(pr.deletions)),
+            counts: pr.line_counts().map(|(additions, deletions)| {
+                (
+                    format!("+{}", compact(additions)),
+                    format!("-{}", compact(deletions)),
+                )
+            }),
         }
     }
 
@@ -185,9 +190,10 @@ impl PrBadge {
     /// a wider face truncates the counts rather than eating the label.
     pub(super) fn width(&self, font: &FontConfig, layout: &dyn SidebarDensity) -> f32 {
         let mut glyphs = self.number.chars().count();
-        if layout.pr_counts() {
-            glyphs =
-                glyphs.max(self.additions.chars().count() + self.deletions.chars().count() + 1);
+        if layout.pr_counts()
+            && let Some((additions, deletions)) = &self.counts
+        {
+            glyphs = glyphs.max(additions.chars().count() + deletions.chars().count() + 1);
         }
         (glyph_width(font) * glyphs as f32).ceil()
     }
@@ -302,6 +308,10 @@ pub(super) fn row(
     workspace_icon: RowIcon,
     arrow: Option<Stateful<Div>>,
     badge: Option<RowBadge>,
+    // The status word the daemon's `state_text` token asks to show, when its
+    // sidebar config names it. Painted at the row's trailing edge in the dot's
+    // color so a status reads at a glance, not only by hue.
+    status_text: Option<&'static str>,
     look: SidebarLook,
     appearance: (&FontConfig, &Theme),
 ) -> Div {
@@ -346,7 +356,21 @@ pub(super) fn row(
     } else {
         0.
     };
-    let label_width = (available - pr_reserve).max(0.);
+    // The status word keeps its own trailing column, so the label yields to it
+    // the same way it yields to a badge, and like the badge it is clipped to
+    // the room left rather than painting past the row.
+    let status_width = status_text.map_or(0., |text| {
+        (text.chars().count() as f32 * glyph_width(font))
+            .ceil()
+            .min((available - pr_reserve - gap).max(0.))
+    });
+    let status_reserve = if status_text.is_some() {
+        status_width + gap
+    } else {
+        0.
+    };
+    let status_color = status_style(status).2;
+    let label_width = (available - pr_reserve - status_reserve).max(0.);
     let agent_icon = match kind {
         RowKind::Agent(icon) => Some(icon),
         RowKind::Workspace => None,
@@ -482,6 +506,20 @@ pub(super) fn row(
                     )
                 }),
         )
+        .when_some(status_text, |row, text| {
+            row.child(
+                div()
+                    .debug_selector(|| format!("status-{key}"))
+                    .w(px(status_width))
+                    .flex_none()
+                    .h(px(line_height(font)))
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .text_color(rgb(status_color))
+                    .child(div().w(px(status_width)).truncate().child(label_text(text))),
+            )
+        })
         // The collapse column comes first so the badge can hug the row's edge;
         // a reserved-but-empty column keeps every badge on the same right edge.
         .when_some(arrow, |row, arrow| row.child(arrow))
@@ -531,32 +569,36 @@ pub(super) fn row(
                                 )
                             }),
                     )
-                    .when_some(pr.filter(|_| layout.pr_counts()), |column, badge| {
-                        column.child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(rgb(theme.palette[2]))
-                                        .child(label_text(&badge.additions)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(rgb(theme.muted))
-                                        .child(label_text("/")),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(rgb(theme.palette[1]))
-                                        .child(label_text(&badge.deletions)),
-                                ),
-                        )
-                    }),
+                    .when_some(
+                        pr.filter(|_| layout.pr_counts())
+                            .and_then(|badge| badge.counts),
+                        |column, (additions, deletions)| {
+                            column.child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme.palette[2]))
+                                            .child(label_text(&additions)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme.muted))
+                                            .child(label_text("/")),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme.palette[1]))
+                                            .child(label_text(&deletions)),
+                                    ),
+                            )
+                        },
+                    ),
             )
         })
 }

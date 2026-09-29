@@ -153,7 +153,7 @@ impl HerdrWindow {
             .config
             .keybindings
             .shortcuts(Command::Settings)
-            .first()
+            .next()
             .map_or_else(
                 || "Settings".to_owned(),
                 |shortcut| format!("Settings ({shortcut})"),

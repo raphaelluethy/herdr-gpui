@@ -4,6 +4,7 @@
 
 use super::{
     super::{
+        agents::status_style,
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
         row::RowTree,
@@ -192,6 +193,16 @@ impl RowLayout for Orca {
                 line.label(
                     div().text_color(rgb(theme.muted)),
                     place,
+                    glyph_at(font, font.size),
+                    0.5,
+                )
+            })
+            .when_some(agent.status_text, |line, text| {
+                line.label(
+                    div()
+                        .debug_selector(|| format!("status-{key}"))
+                        .text_color(rgb(status_style(agent.status).2)),
+                    text,
                     glyph_at(font, font.size),
                     0.5,
                 )

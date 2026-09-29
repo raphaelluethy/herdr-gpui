@@ -185,10 +185,10 @@ impl RowLayout for Superset {
             .when(dirty, |line| {
                 line.fixed(dirty_size, parts::dirty(label, dirty_size, theme))
             })
-            .when_some(pr, |line, pr| {
-                let (width, counts) = parts::pr_counts(label, pr, m.glyph, counts);
-                line.shrink(width, counts.text_size(px(m.small)))
-            })
+            .when_some(
+                pr.and_then(|pr| parts::pr_counts(label, pr, m.glyph, counts)),
+                |line, (width, counts)| line.shrink(width, counts.text_size(px(m.small))),
+            )
             .when_some(fold, |line, fold| {
                 let width = m.icon * 0.6;
                 line.fixed(width, fold.element(theme).w(px(width)).text_size(px(14.)))
@@ -218,6 +218,17 @@ impl RowLayout for Superset {
                         .text_size(px(m.small))
                         .text_color(rgb(theme.muted)),
                     place,
+                    m.glyph,
+                    0.5,
+                )
+            })
+            .when_some(agent.status_text, |line, text| {
+                line.label(
+                    div()
+                        .debug_selector(|| format!("status-{key}"))
+                        .text_size(px(m.small))
+                        .text_color(rgb(status_style(agent.status).2)),
+                    text,
                     m.glyph,
                     0.5,
                 )

@@ -5,6 +5,7 @@
 use super::{
     super::{
         ARROW_RESERVE, STATUS_WIDTH,
+        agents::status_style,
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
         row::{RowKind, RowTree, row_text},
@@ -75,7 +76,17 @@ impl RowLayout for Minimal {
                 parts::status(agent.status, false, theme, font),
             )
             .fixed(icon, parts::icon(agent.icon.path(), icon, color))
-            .fill(name(&agent.key, kind, state, theme), agent.name);
+            .fill(name(&agent.key, kind, state, theme), agent.name)
+            .when_some(agent.status_text, |line, text| {
+                line.label(
+                    div()
+                        .debug_selector(|| format!("status-{}", agent.key))
+                        .text_color(rgb(status_style(agent.status).2)),
+                    text,
+                    parts::glyph_at(font, font.size),
+                    0.5,
+                )
+            });
         shell(&agent.key, state, 0., line, cx)
     }
 }

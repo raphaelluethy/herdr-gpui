@@ -274,7 +274,9 @@ the in-app menu, the command palette, or `cmd-=` / `cmd--` / `cmd-0`. Adjustment
 are clamped to the same 8..48 range, apply to the terminal only, and are never
 written to disk, so a reload or a restart returns to the configured size.
 
-Set top-level `confirm_close_tab = false` to close tabs without confirmation
+A tab asks before closing only while one of its agents is working or blocked
+on a prompt; tabs whose agents are idle or done, or that have none, close at
+once. Set top-level `confirm_close_tab = false` to never ask for tabs
 (including their running processes), and `show_agents = false` to hide the Agents
 section and give Spaces the full sidebar height. Both default to `true`. Pane
 closures still ask for confirmation. Saved edits apply automatically.
@@ -364,6 +366,12 @@ Normal and Compact show PR numbers without change counts. Status indicators and
 agent-name lines remain visible in every density, and flat ones keep tree guides;
 font sizes and terminal spacing are unchanged. Saved edits apply automatically.
 
+When the daemon's `[ui.sidebar.agents]` rows name the `state_text` token, the
+GUI shows the same status word beside each agent, in the activity dot's color,
+in every layout. An agent with its own `rows_by_agent` entry follows that entry
+instead, as the terminal client does. Rows without the token keep the dot
+alone, so an unconfigured pair of clients renders alike.
+
 Three more layouts draw rows with a design of their own, each with fixed
 spacing:
 
@@ -414,8 +422,9 @@ The terminal keeps the remaining width, so the daemon is resized to the columns
 it actually has, and the gap is ignored while the sidebar is hidden.
 
 The `[clipboard_toast]` table controls the `copied to clipboard` flash shown
-after a terminal selection is copied. It is the one GUI setting that starts from
-the daemon's own config: `[ui.toast.clipboard]` in `config.toml` (resolved like
+after a terminal selection is copied. Like the keymap (see the daemon `[keys]`
+under keyboard shortcuts), it starts from the daemon's own config:
+`[ui.toast.clipboard]` in `config.toml` (resolved like
 the sound settings below) answers it first, so setting it there covers both
 clients, and each key here overrides that answer on its own.
 
@@ -540,7 +549,8 @@ themes while keeping light themes light. It sits above the sidebar and tabs: 80p
 of traffic-light clearance, an empty flexible center, and a 40px upper-right slot.
 The slot centers a 16px circular user avatar with a 12px SVG in a 28px hover target, tinted from
 the theme foreground. This profile control opens native GitHub sign-in and shows
-the authenticated user's avatar when connected. It consumes clicks so
+the authenticated user's avatar when connected, or the `gh` account's avatar when
+[your own GitHub CLI](#using-your-own-gh-and-glab) provides access. It consumes clicks so
 double-clicking it does not invoke the title-bar action.
 The header and clearance remain in fullscreen so the body layout stays stable.
 Windows/Linux keep the existing native frame and do not render this header.
@@ -942,6 +952,82 @@ mkdir -p ~/.claude/skills/herdr-gpui-browser
 herdr-gpui browser skill > ~/.claude/skills/herdr-gpui-browser/SKILL.md
 ```
 
+## Review Panel
+
+Cmd-Shift-G (`toggle_review_panel`), **View > Toggle Review Panel**, the
+command palette, or **Review changes** in the title bar's Git popup opens a
+dock to the right of the terminal that reviews the focused workspace's
+checkout, modeled on Zed's git panel and project diff. The terminal shrinks to
+make room and follows the new size; drag the panel's left edge to resize it,
+double-click the edge to restore the default width.
+
+- Only a local checkout is reviewed: the same owned local daemon and verified
+  worktree the Git popup acts on. Remote and SSH workspaces show a note saying
+  the panel does not support them yet.
+- **Uncommitted** lists the working tree against HEAD, in the sections
+  Conflicts, Tracked, and Untracked, with the status letter colored as Zed
+  colors it, the file name, and its folder in muted text. Each tracked or
+  untracked row has a checkbox that stages (`git add`) or unstages (`git
+  restore --staged`; `git rm --cached` before the first commit) that file; a
+  section header's checkbox stages or unstages the section, and **Stage all**
+  / **Unstage all** in the header does the whole tree. Staging is an explicit
+  action, run once and never retried; there is no discard or restore.
+- **Branch** lists the working tree against the merge base with the default
+  branch: origin's default branch when Git knows it, else the first of
+  `origin/main`, `origin/master`, `main`, `master` that exists. The header
+  names the base. Nothing can be staged in this view.
+- Selecting a file, by click or with the up and down keys while the panel has
+  focus, shows its unified diff below the list with old and new line numbers,
+  added and removed line washes, and hunk headers. Untracked files show as all
+  added, deleted files as all removed, binary files, mode changes, and renames
+  as a notice. Diffs are bounded: 5000 rows, 400 characters a line, 1 MiB of
+  an untracked file, and 2 MiB of Git output; a cut diff says "Diff truncated".
+  Space stages or unstages the selected file; Escape returns the keyboard to
+  the terminal. Keys reach the panel only while it has focus, so typing in the
+  terminal is never taken.
+- The file list refreshes when the panel opens, on **Refresh**, after staging,
+  after a title bar commit or push, and every five seconds while the panel
+  shows and the window is active. A result for a checkout, view, or file no
+  longer shown is dropped rather than painted.
+- The **Open** button in a row or the diff header opens the file in the
+  system's default application; **Reveal** shows it in the file manager. Both
+  resolve the path under the checkout Git verified and refuse a path that
+  would leave it; a deleted file has nothing to open.
+
+### Review Comments
+
+Comments are written on the diff and sent to an agent in one of your panes.
+
+- Hover a line and click its **+** to start a comment on it; drag, or
+  Shift-click another line, to cover a range. A range stops at a hunk header
+  and at 60 lines. The composer opens under the last covered line with
+  "Lines 12-18"; Enter saves the comment, Escape drops it. Saved comments show
+  under their lines with edit and delete buttons, and all of them in the
+  footer's list, which names each file and line range.
+- A comment remembers the diff lines it was written on. When the file's diff
+  changes it follows those lines wherever they moved, and when they are gone
+  it is kept but marked **stale** in the footer's list. Comments belong to
+  their checkout, stay through toggling the panel and switching views, and are
+  bounded: 50 per checkout, 2000 characters each, one line, cleaned of control
+  characters.
+- **Send to <agent> (N)** hands the comments to an agent. The chevron beside
+  it lists every agent Herdr reports, the reviewed workspace's agents first
+  and its focused one on top, each with its status dot and tab; the button
+  sends to the one on top unless you pick another. The prompt names the
+  repository, branch, and view, then each comment as `path:L12-L18` (`(old)`
+  for lines of the old side), the covered diff lines fenced as quoted data,
+  and the comment; it is bounded at 64 KiB and says how many comments were
+  left out. **Copy** puts the same prompt on the clipboard and keeps the
+  comments; **Clear** drops them.
+- Sending shares the browser notes' delivery: the prompt is pasted into the
+  agent's pane and submitted once Herdr reports the agent idle, or after two
+  minutes of it still working. It is never typed into a pane where Herdr sees
+  no running agent, since Enter there would run it in a shell, nor into an
+  agent asking you a question; then, or when no agent is open, or the pane
+  cannot be reached, it is copied to the clipboard and the flash says so. The
+  comments are cleared when you press Send, as browser notes are, so a second
+  Send cannot repeat them.
+
 ## macOS Dock Badge
 
 The Dock icon shows the number of agents reporting `Done` (finished) or `Blocked`
@@ -985,7 +1071,8 @@ Windows setup) nothing is saved and the window says so.
   workspaces, local collapse arrows, branch details, and daemon-driven
   filled/hollow activity indicators taken from the daemon's own status, so the
   GUI and the terminal client always show the same dot. Each worktree row also
-  carries its cached pull request number and diff counts.
+  carries its cached pull request number (`!N` for a GitLab merge request) and,
+  where the forge reports them, diff counts.
 - Agents panel header ends with its sort, `grouped` or `priority`, which a
   click flips; an active agent view names itself there instead. Client-local
   and persisted beside the sidebar width, as in the terminal client.
@@ -1042,8 +1129,11 @@ Windows setup) nothing is saved and the window says so.
   Context menus and dialogs anchor to the pointer and clamp to the viewport.
   Rename trims surrounding whitespace and rejects blank labels inline.
   The PR tab supports fork pull requests: it fetches GitHub's PR head ref from
-  the repository's origin and creates a local `pr/<number>` branch. Existing
-  local branches are preserved; repository trust is not granted.
+  the repository's origin and creates a local `pr/<number>` branch. On a GitLab
+  origin the tab reads MR and lists open merge requests through `glab`; a fork's
+  merge request is fetched from `refs/merge-requests/<iid>/head` into a local
+  `mr/<iid>` branch. Existing local branches are preserved; repository trust is
+  not granted.
 - Open worktree... asynchronously lists the clicked parent's existing checkouts
   through `worktree.list`, including already-open and detached checkouts but
   excluding bare/prunable entries. Use Up/Down and Enter, the Open button, or
@@ -1071,11 +1161,14 @@ Windows setup) nothing is saved and the window says so.
   same focus flow as creation. Escape/outside click dismisses even while waiting;
   this does not cancel queued daemon work, but late replies cannot reopen the
   picker or steal this client's focus. All Git/filesystem work stays in Herdr.
-- Signed-in workspace menus include a compact, divided PR summary. The number/title
+- Workspace menus include a compact, divided PR summary whenever a forge is
+  reachable: the native GitHub sign-in, or an authenticated `gh` or `glab`
+  (see [Using your own gh and glab](#using-your-own-gh-and-glab)). The number/title
   is the last selectable menu action: click it or use arrows and Enter to open the
    validated URL. Cache-only menu opening shows prefetched results immediately,
    or loading for an initial miss; no separate Open/Refresh controls or O/R shortcuts.
-   One background Git/native HTTPS GraphQL worker refreshes the selected device's
+   One background worker (local Git, then native HTTPS GraphQL, `gh api graphql`,
+   or `glab api`, by the origin's forge) refreshes the selected device's
    eligible workspace metadata every 90 seconds, with a 128-entry LRU cache, 128 queued jobs, and
    alternating open/focused priority and round-robin scheduling. Failed refreshes
    retain successful data. Ordinary failures back off five minutes; auth/rate-limit
@@ -1083,7 +1176,7 @@ Windows setup) nothing is saved and the window says so.
    hints within five minutes to 24 hours. Auth/endpoint generations fence late results.
    Discovery uses the daemon repository key and exact branch to resolve a unique
    Git worktree, followed by common-directory/current-branch checks and an explicit
-   GitHub repository/head query. It never occupies the deletion dialog response slot.
+   repository/head query on the origin's forge. It never occupies the deletion dialog response slot.
    PR heads use the branch's configured upstream remote owner/repository and merge
    branch, so renamed local branches can identify fork PRs. Without an upstream,
    lookup uses the local branch name and requires the origin owner as before.
@@ -1128,7 +1221,9 @@ Windows setup) nothing is saved and the window says so.
   purple, and closed PRs red.
 - The top-right titlebar profile control starts native GitHub device sign-in on
   a signed-out click, shows the authenticated user's avatar, and offers Sign out
-  on right-click. Signed-out workspace menus have no GitHub section or requests.
+  on right-click. When `gh` provides access instead, a click opens the account
+  panel rather than starting device sign-in. With no native sign-in and no
+  signed-in `gh` or `glab`, workspace menus have no PR section or requests.
   The signed-out GitHub icon and connected avatar share a 20px size and subtle
   hover glow; authentication errors appear in the account panel, not a red border.
   It uses Herdr GPUI's public client ID `Iv23liurUcwxPjrdIFYT`, overridden by
@@ -1171,8 +1266,58 @@ Windows setup) nothing is saved and the window says so.
    focus to the terminal. Reopen the account panel to use the red Sign out action.
    Older versions saved only access tokens, so an expired legacy token needs
    one more sign-in to obtain a refresh token. Revoked or expired refresh tokens
-   also require sign-in. No CLI authentication is used. See
+   also require sign-in. The native sign-in itself never runs a CLI; using your
+   own authenticated `gh` or `glab` instead is described below. See
   [setup, cancellation, scopes, and sign-out](../../README.md#native-github-sign-in).
+- <a id="using-your-own-gh-and-glab"></a>**Using your own gh and glab.** An
+  authenticated [GitHub CLI](https://cli.github.com/) (`gh auth login`) can stand
+  in for the native sign-in, and an authenticated
+  [GitLab CLI](https://gitlab.com/gitlab-org/cli) (`glab auth login`) serves
+  GitLab origins, on gitlab.com and on every self-hosted host `glab auth status`
+  reports, nested groups (`group/subgroup/project`) included. Their credentials
+  never enter this process: the app runs `gh api graphql` (the same queries the
+  native path posts) or `glab api --hostname HOST`, addressing projects by encoded
+  path or numeric ID, and never runs `gh auth token`. PR badges, the workspace PR
+  summary, the Git dropdown's Create pull request, and the new-worktree PR and
+  issue tabs all work through them; GitLab items read MR and `!N`.
+  Precedence is set in the GUI config:
+
+  ```toml
+  [github]
+  cli = "auto"   # native sign-in first, then gh; "prefer": gh first; "off": never gh
+
+  [gitlab]
+  cli = "auto"   # glab for GitLab origins; "off": never glab
+  ```
+
+  A background probe (never on the UI thread, and never in headless windows)
+  finds each CLI on `PATH` or where Homebrew, Nix, or `~/.local/bin` installs it,
+  then runs `gh auth status --hostname github.com` and `gh api user`, or
+  `glab auth status` and `glab api user` per signed-in host (at most four). The
+  result is kept for five minutes and probed again when the account panel opens
+  or the config reloads. A missing CLI reads as not installed, never as an
+  error. The account panel says which CLI is in use and as whom ("Using GitHub
+  CLI as @login", "GitLab CLI as @login on gitlab.com"), or why one is not.
+  CLI children use the same deadline, output cap, and cancellation as Git
+  children, with stdout read apart from stderr, stdin closed, and `/` as the
+  working directory. They keep your own CLI environment (`GH_TOKEN`,
+  `GH_CONFIG_DIR`, `GITLAB_TOKEN`, `GLAB_CONFIG_DIR`, ...) but drop `GH_HOST`,
+  `GH_REPO`, and debug switches, and set `GH_PROMPT_DISABLED=1`, `NO_PROMPT=1`,
+  `NO_COLOR=1`, and a `cat` pager. Git children stay exactly as strict as before.
+  Failures are typed: not installed, not signed in (with the login command),
+  rate limited, or a request failure with a bounded, cleaned, and redacted line
+  of the CLI's own error. Rate limits and GraphQL `RATE_LIMITED`/`FORBIDDEN`
+  errors pause lookups for an hour, as native ones do; a CLI that stopped being
+  signed in pauses them for five minutes.
+  GitLab merge requests map onto the same summary: `opened`/`locked`, `closed`,
+  and `merged` lifecycles, drafts, the head pipeline as the checks line, and
+  `detailed_merge_status` as the merge status and review requirement. GitLab's
+  API reports no line counts, so GitLab rows, the titlebar, and menus show none
+  rather than `+0 -0`. Links are rebuilt from the verified project address, never
+  taken from a reply. Merge requests are opened into the project's default
+  branch. GitLab avatars are not downloaded, since they live on arbitrary hosts.
+  A CLI runs on this machine, so it also answers for saved SSH devices, whose
+  origins are resolved over SSH as before.
 - Workspace actions retain the clicked ID and boot, revalidate before queueing,
   and reject changed close-group membership. Reconnect clears dialogs. Queue
   errors remain in the dialog; daemon errors appear in the connection status bar.
@@ -1192,8 +1337,8 @@ Windows setup) nothing is saved and the window says so.
 - Right-click any tab without focusing it to open Rename.
   Actions retain the clicked tab/workspace and reject stale connections or targets.
   Rename selects the current label in a native IME-aware field, with inline errors;
-  Close uses the existing cancel-by-default confirmation unless
-  `confirm_close_tab = false`. Escape or an outside left/right click dismisses
+  Close uses the existing cancel-by-default confirmation when an agent in the
+  tab is working or blocked, unless `confirm_close_tab = false`. Escape or an outside left/right click dismisses
   the menu without sending terminal input.
 - Click workspace, tab, agent, or a visible split pane to focus through the API.
 - Right-click a visible pane, including an inactive split, for Rename, Split
@@ -1233,8 +1378,8 @@ Windows setup) nothing is saved and the window says so.
   to the running program; daemons that do not advertise it (Herdr 0.9.1 and
   older) leave it out of the palette and report why instead.
 - Cmd-W closes the focused pane and Cmd-Shift-W closes the focused tab only after
-  a confirmation dialog (tab confirmation can be disabled with
-  `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;
+  a confirmation dialog (a tab asks only while an agent in it is working or
+  blocked, and never with `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;
   Tab then Enter selects and confirms Close. Closing can terminate running
   processes, unlike quitting the GUI, which only detaches.
 - Cmd-Shift-P opens the command palette with native actions and configured daemon
@@ -1249,7 +1394,29 @@ Windows setup) nothing is saved and the window says so.
   away from its default command, keystrokes need a cmd, ctrl, alt, or fn
   modifier, and unknown names, unparseable keys, or one key on two configured
   commands reject the config. Saved changes rebind the keymap and menu bar live.
-- Cmd-B toggles sidebar visibility locally without changing daemon state.
+- The daemon's own `[keys]` table in `config.toml` (resolved like
+  `[ui.toast.clipboard]` above) applies in the GUI too, Herdr's defaults
+  included, so a TUI habit such as `prefix+v` or `alt+1..9` works in both
+  clients. The prefix (`ctrl+b` unless `prefix` says otherwise) arms the
+  window, shown by a keycap in the status bar; the next keystroke runs its
+  chord or, when nothing is bound to it, is dropped, as in the TUI. Typing the
+  prefix twice sends it to the terminal, and Escape cancels. Chords work from
+  a menu's or dialog's text field too: the chord closes it and runs. Daemon actions
+  with a GUI command are `new_workspace`, `new_worktree`, `workspace_picker`
+  and `goto` (both Go To), `settings`, `help` (the shortcut reference),
+  `open_notification_target`, `new_tab`, `next_tab`, `previous_tab`,
+  `switch_tab`, `close_tab`, `split_vertical` (Split Right),
+  `split_horizontal` (Split Down), `focus_pane_*`, `cycle_pane_next`,
+  `cycle_pane_previous`, `zoom`, `close_pane`, `clear_pane`, and
+  `toggle_sidebar`; the rest stay TUI-only. Daemon keys add to the catalog
+  defaults and take a keystroke from its default command. A command named in
+  `[keybindings]` keeps exactly the keystrokes listed there, daemon chords
+  included, and a keystroke listed there outranks the daemon's, even the
+  prefix. Herdr validates its own file, so a daemon entry the GUI cannot
+  express (a `hyper` modifier, a direct key without cmd, ctrl, alt, or fn) is
+  skipped rather than rejected. Saving either file rebinds live.
+- Cmd-B toggles sidebar visibility locally without changing daemon state, and
+  Cmd-Shift-G the [review panel](#review-panel).
   Cmd-, opens Settings; Cmd-/ opens the grouped native shortcut reference.
   Native shortcut labels and keycaps come from the shared `controls::COMMANDS`
   catalog, overridden by the config's `[keybindings]` table, with Cmd-V semantic
@@ -1406,7 +1573,9 @@ These features are unavailable on Windows and say so rather than failing quietly
   stays disabled and reports that no standalone updater exists for this platform.
   Homebrew delegation is macOS-only regardless.
 - **Saved GitHub credentials.** Neither the Keychain nor the private `0600` file
-  exists here, so `GH_TOKEN` / `GITHUB_TOKEN` are the only sources of a token.
+  exists here, so `GH_TOKEN` / `GITHUB_TOKEN` are the only sources of a native
+  token. An authenticated `gh` or `glab` still works, since each keeps its own
+  credential.
 - **The avatar disk cache.** It depends on `openat`, `flock`, and POSIX
   ownership and mode checks, so avatars stay in memory for the process lifetime.
 

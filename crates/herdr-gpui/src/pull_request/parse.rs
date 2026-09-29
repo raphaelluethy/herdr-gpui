@@ -23,10 +23,10 @@ pub(super) fn parse_graphql(
             pr["headRefName"].as_str() == Some(head.branch.as_str())
                 && pr["headRepositoryOwner"]["login"]
                     .as_str()
-                    .is_some_and(|owner| owner.eq_ignore_ascii_case(&head.owner))
+                    .is_some_and(|owner| owner.eq_ignore_ascii_case(head.remote.owner()))
                 && pr["headRepository"]["name"]
                     .as_str()
-                    .is_some_and(|repo| repo.eq_ignore_ascii_case(&head.repo))
+                    .is_some_and(|repo| repo.eq_ignore_ascii_case(head.remote.name()))
         });
     }
     let mut incomplete = false;
@@ -41,7 +41,7 @@ pub(super) fn parse_graphql(
         owner,
         repo,
         branch,
-        head.map_or(owner, |head| head.owner.as_str()),
+        head.map_or(owner, |head| head.remote.owner()),
     )?;
     if incomplete && let Some(pr) = &mut result {
         pr.checks_summary

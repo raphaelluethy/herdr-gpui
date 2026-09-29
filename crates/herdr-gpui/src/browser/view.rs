@@ -50,6 +50,8 @@ pub(crate) struct Browser {
     pub(crate) terminals: crate::group_terminals::GroupTerminals,
     /// Tabs growing into the strip as they open.
     pub(super) appear: super::tab_appear::TabAppear,
+    /// Each strip's sideways scroll.
+    pub(super) tab_scroll: super::tab_scroll::TabScroll,
     /// Groups opening from a split and folding away as they close.
     pub(super) group_motion: super::group_motion::GroupMotion,
     /// Why a tab's page could not be created, shown in its place.
@@ -80,6 +82,7 @@ impl Browser {
             new_tab_group: None,
             terminals: Default::default(),
             appear: Default::default(),
+            tab_scroll: Default::default(),
             group_motion: Default::default(),
             failed: None,
             workspaces: None,
@@ -368,8 +371,6 @@ impl HerdrWindow {
         }
         self.forget_closed_workspaces(cx);
         self.forget_closed_herdr_tabs(cx);
-        #[cfg(any(target_os = "macos", windows))]
-        self.poll_deliveries(cx);
         self.sync_addresses(false, window, cx);
     }
 
@@ -616,7 +617,7 @@ impl HerdrWindow {
         slot: Slot,
         shown: Option<TabId>,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    ) -> Vec<(TabId, Stateful<Div>)> {
         let (Some((scope, workspace)), Some(store)) = (self.browser_key(), store(cx)) else {
             return Vec::new();
         };
@@ -629,7 +630,7 @@ impl HerdrWindow {
             .map(|tab| {
                 let id = tab.id;
                 let (background, text) = self.tab_colors(shown == Some(id), slot.id);
-                div()
+                let tab = div()
                     .id(SharedString::from(format!("browser-tab-{id}")))
                     .debug_selector(move || slot.selector(&format!("browser-tab-{id}")))
                     .pl(px(10.))
@@ -686,8 +687,8 @@ impl HerdrWindow {
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_browser_tab_in(Some(slot.id), id, window, cx);
-                    }))
-                    .into_any_element()
+                    }));
+                (id, tab)
             })
             .collect()
     }

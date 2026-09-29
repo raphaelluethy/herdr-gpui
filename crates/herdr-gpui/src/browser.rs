@@ -23,13 +23,14 @@ mod preview;
 mod snapshot;
 mod store;
 mod tab_appear;
+mod tab_scroll;
 mod view;
 #[cfg(test)]
 mod view_tests;
 
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use annotate_view::Annotations;
-pub(crate) use feedback::Feedback;
+pub(crate) use feedback::{Batch, Feedback};
 pub(crate) use group_motion::Fold;
 #[cfg(test)]
 pub(crate) use groups::GroupIds;
@@ -40,6 +41,7 @@ pub(crate) use location::{LocalFile, Location};
 pub(crate) use native::Pages;
 pub(crate) use store::{Scope, Store, Tab, TabId};
 pub(crate) use tab_appear::{Leaving, Listed};
+pub(crate) use tab_scroll::ThumbDrag;
 pub(crate) use view::Browser;
 #[cfg(test)]
 pub(crate) use view::scope;

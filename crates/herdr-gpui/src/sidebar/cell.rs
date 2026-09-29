@@ -87,6 +87,9 @@ pub(super) struct AgentRow<'a> {
     /// Its workspace and, when that earns a place, its tab. Missing once the
     /// workspace has gone.
     pub(super) place: Option<(&'a str, Option<&'a str>)>,
+    /// The daemon's `state_text` word when its sidebar config asks for it, so
+    /// the GUI and the TUI name the status the same way.
+    pub(super) status_text: Option<&'static str>,
 }
 
 /// What a row shows.

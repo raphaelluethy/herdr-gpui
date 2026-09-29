@@ -152,6 +152,19 @@ pub(crate) fn status_dot(status: AgentStatus) -> Div {
         .when(filled, |dot| dot.bg(rgb(color)))
 }
 
+/// The word the daemon's `state_text` token shows for a status when its
+/// sidebar config asks for it. Lowercase, matching the daemon's status names
+/// and what the terminal client prints.
+pub(super) fn status_text(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Working => "working",
+        AgentStatus::Blocked => "blocked",
+        AgentStatus::Done => "done",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Unknown => "unknown",
+    }
+}
+
 /// Upstream draws status from its own palette, defaulting to Catppuccin Mocha,
 /// and never from the terminal's ANSI colors. Matching those literals keeps a
 /// dot the same color in both clients whatever terminal theme is loaded, where

@@ -4,7 +4,7 @@
 
 use super::{
     DEVICE_FOOTER_HEIGHT, HOST_ARROW_WIDTH, HOST_GAP, STATUS_WIDTH, SidebarDrag, agent_name,
-    agents::agent_place,
+    agents::{agent_place, status_text},
     agents_sort,
     cell::{AgentRow, Cell, Fold, RowContext, RowData, RowState, WorkspaceRow, layout_for},
     label_text,
@@ -228,7 +228,7 @@ impl HerdrWindow {
                 let slot = drag
                     .and_then(|drag| drag.target.as_ref())
                     .map_or(plan.dragged(), |target| target.slot);
-                reorder::preview(&heights, plan.dragged(), slot)
+                crate::reorder::preview(&heights, plan.dragged(), slot)
             });
             // A child closes the group when no child follows it.
             let closes: Vec<bool> = (0..entries.len())
@@ -469,6 +469,11 @@ impl HerdrWindow {
                             icon: crate::icons::AgentIcon::from_identity(agent.agent.as_deref()),
                             status: agent.agent_status,
                             place: agent_place(agent, snapshot),
+                            status_text: self
+                                .config
+                                .agent_status_text
+                                .shown_for(agent.agent.as_deref())
+                                .then(|| status_text(agent.agent_status)),
                         }),
                         &row_cx,
                     )
